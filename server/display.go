@@ -120,9 +120,25 @@ func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Han
 	return r, nil
 }
 
-func (r *Resource) ID() uint32        { return wlResourceGetID(r.c) }
-func (r *Resource) Version() int32    { return wlResourceGetVersion(r.c) }
-func (r *Resource) Client() Client    { return Client{wlResourceGetClient(r.c)} }
+func (r *Resource) Alive() bool { return !r.gone }
+func (r *Resource) ID() uint32 {
+	if r.gone {
+		return 0
+	}
+	return wlResourceGetID(r.c)
+}
+func (r *Resource) Version() int32 {
+	if r.gone {
+		return 0
+	}
+	return wlResourceGetVersion(r.c)
+}
+func (r *Resource) Client() Client {
+	if r.gone {
+		return Client{}
+	}
+	return Client{wlResourceGetClient(r.c)}
+}
 func (r *Resource) Iface() *Interface { return r.iface }
 
 // Destroy frees the resource. It is a no-op once the resource is gone, so
@@ -135,7 +151,11 @@ func (r *Resource) Destroy() {
 
 // PostEvent sends an event. Arguments must match the event signature; build
 // string and array arguments with a Pinner and unpin it after this returns.
+// Calling it after destruction is safe and does nothing.
 func (r *Resource) PostEvent(opcode uint32, args ...Arg) {
+	if r.gone {
+		return
+	}
 	var p unsafe.Pointer
 	if len(args) > 0 {
 		p = unsafe.Pointer(&args[0])
@@ -150,7 +170,11 @@ func (r *Resource) PostEvent(opcode uint32, args ...Arg) {
 }
 
 // PostError sends a protocol error and disconnects the client.
+// Calling it after destruction is safe and does nothing.
 func (r *Resource) PostError(code uint32, msg string) {
+	if r.gone {
+		return
+	}
 	// wl_resource_post_error takes a printf format; escape it and pass no
 	// variadic arguments (purego clears AL, as SysV varargs require).
 	b := append([]byte(strings.ReplaceAll(msg, "%", "%%")), 0)

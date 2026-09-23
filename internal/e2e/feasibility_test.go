@@ -16,7 +16,7 @@ import (
 
 // startServer runs a display with a wl_compositor global on a private socket.
 // commits counts wl_surface.commit requests received by Go handlers.
-func startServer(t *testing.T) (socket string, d *server.Display, commits chan uint32) {
+func startServer(t *testing.T, captured ...chan *server.Resource) (socket string, d *server.Display, commits chan uint32) {
 	t.Helper()
 	d, err := server.NewDisplay()
 	if err != nil {
@@ -42,6 +42,9 @@ func startServer(t *testing.T) (socket string, d *server.Display, commits chan u
 	var serial uint32
 	surface := &surfaceHandler{commits: commits, serial: &serial, t: t}
 	compositor := &compositorHandler{surface: surface, t: t}
+	if len(captured) > 0 {
+		compositor.captured = captured[0]
+	}
 	err = wayland.NewCompositorGlobal(d, 1, func(c server.Client, version, id uint32) {
 		if _, err := wayland.NewCompositor(c, int32(version), id, compositor); err != nil {
 			t.Error(err)
@@ -153,6 +156,61 @@ func TestRequestEventRoundtripAndDisconnect(t *testing.T) {
 	}
 }
 
+// A resource retained by Go must be harmless after libwayland destroys its client.
+func TestPostEventAfterDisconnect(t *testing.T) {
+	captured := make(chan *server.Resource, 1)
+	socket, d, _ := startServer(t, captured)
+	c, err := wlturbo.Connect(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Roundtrip(); err != nil {
+		t.Fatal(err)
+	}
+	// Create a surface retained by the server after the client disconnects.
+	g, ok := c.Registry().FindGlobal("wl_compositor")
+	if !ok {
+		t.Fatal("wl_compositor not advertised")
+	}
+	comp, err := c.Registry().BindID(g.Name, g.Interface, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	surf := c.AllocateID()
+	must(t, c.SendRequest(comp, uint16(wayland.CompositorRequestCreateSurface), surf))
+	if err := c.Roundtrip(); err != nil {
+		t.Fatal(err)
+	}
+	stale := <-captured
+	_ = c.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var n int
+		d.Do(func() { n = server.LiveResources() })
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d resources still alive", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	d.Do(func() {
+		if stale == nil {
+			t.Error("resource was not created")
+			return
+		}
+		if stale.Alive() {
+			t.Error("resource still alive")
+		}
+		stale.PostEvent(0)
+		stale.PostError(0, "gone")
+		if stale.ID() != 0 || stale.Version() != 0 || stale.Client() != (server.Client{}) {
+			t.Error("destroyed resource returned nonzero metadata")
+		}
+	})
+}
+
 // doneProxy records wl_callback.done.
 type doneProxy struct {
 	wlturbo.BaseProxy
@@ -173,13 +231,19 @@ func must(t *testing.T, err error) {
 }
 
 type compositorHandler struct {
-	surface *surfaceHandler
-	t       *testing.T
+	surface  *surfaceHandler
+	t        *testing.T
+	captured chan *server.Resource
 }
 
 func (h *compositorHandler) CreateSurface(self *wayland.Compositor, id uint32) {
-	if _, err := wayland.NewSurface(self.Client(), self.Version(), id, h.surface); err != nil {
+	r, err := wayland.NewSurface(self.Client(), self.Version(), id, h.surface)
+	if err != nil {
 		h.t.Error(err)
+		return
+	}
+	if h.captured != nil {
+		h.captured <- r.Resource
 	}
 }
 func (h *compositorHandler) CreateRegion(self *wayland.Compositor, id uint32) {
