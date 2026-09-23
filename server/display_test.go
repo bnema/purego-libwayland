@@ -111,3 +111,26 @@ func TestDoBlockedDuringCancellation(t *testing.T) {
 		t.Fatal("blocked Do leaked")
 	}
 }
+
+func TestCloseBeforeRun(t *testing.T) {
+	d, err := NewDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Bind(fd, &unix.SockaddrUnix{Name: "\x00purego-close-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(fd, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddSocketFD(fd); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d.Close()
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -47,6 +48,7 @@ type Display struct {
 	loop    uintptr
 	calls   chan func()
 	stopped chan struct{}
+	state   atomic.Uint32
 }
 
 func NewDisplay() (*Display, error) {
@@ -79,8 +81,22 @@ func (d *Display) CreateGlobal(iface *Interface, version int32, bindFn BindFunc)
 	return nil
 }
 
+// Close destroys a display that has not started Run. It is a no-op once Run
+// has started; Run owns destruction in that case. Call before Run starts.
+func (d *Display) Close() {
+	if !d.state.CompareAndSwap(0, 1) {
+		return
+	}
+	wlDisplayDestroyClients(d.c)
+	wlDisplayDestroy(d.c)
+	close(d.stopped)
+}
+
 // Run dispatches libwayland on one OS-locked goroutine until ctx is done.
 func (d *Display) Run(ctx context.Context) error {
+	if !d.state.CompareAndSwap(0, 2) {
+		return errors.New("purego-libwayland: display already started or closed")
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(d.stopped)
