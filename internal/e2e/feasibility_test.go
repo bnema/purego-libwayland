@@ -144,7 +144,9 @@ func TestRequestEventRoundtripAndDisconnect(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			var n int
-			d.Do(func() { n = server.LiveResources() })
+			if !d.Do(func() { n = server.LiveResources() }) {
+				t.Fatal("display stopped")
+			}
 			if n == 0 {
 				break
 			}
@@ -186,7 +188,9 @@ func TestPostEventAfterDisconnect(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var n int
-		d.Do(func() { n = server.LiveResources() })
+		if !d.Do(func() { n = server.LiveResources() }) {
+			t.Fatal("display stopped")
+		}
 		if n == 0 {
 			break
 		}
@@ -195,7 +199,7 @@ func TestPostEventAfterDisconnect(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	d.Do(func() {
+	if !d.Do(func() {
 		if stale == nil {
 			t.Error("resource was not created")
 			return
@@ -208,7 +212,9 @@ func TestPostEventAfterDisconnect(t *testing.T) {
 		if stale.ID() != 0 || stale.Version() != 0 || stale.Client() != (server.Client{}) {
 			t.Error("destroyed resource returned nonzero metadata")
 		}
-	})
+	}) {
+		t.Fatal("display stopped")
+	}
 }
 
 // doneProxy records wl_callback.done.

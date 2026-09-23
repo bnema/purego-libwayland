@@ -43,9 +43,10 @@ var live = struct {
 // Display owns a wl_display. All methods except Do must run on the goroutine
 // that calls Run, or before Run starts.
 type Display struct {
-	c     uintptr
-	loop  uintptr
-	calls chan func()
+	c       uintptr
+	loop    uintptr
+	calls   chan func()
+	stopped chan struct{}
 }
 
 func NewDisplay() (*Display, error) {
@@ -56,7 +57,7 @@ func NewDisplay() (*Display, error) {
 	if c == 0 {
 		return nil, errors.New("purego-libwayland: wl_display_create failed")
 	}
-	return &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func())}, nil
+	return &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func()), stopped: make(chan struct{})}, nil
 }
 
 // AddSocketFD serves clients on an already bound, listening unix socket.
@@ -82,11 +83,14 @@ func (d *Display) CreateGlobal(iface *Interface, version int32, bindFn BindFunc)
 func (d *Display) Run(ctx context.Context) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer close(d.stopped)
+	defer func() {
+		wlDisplayDestroyClients(d.c)
+		wlDisplayDestroy(d.c)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
-			wlDisplayDestroyClients(d.c)
-			wlDisplayDestroy(d.c)
 			return nil
 		case fn := <-d.calls:
 			fn()
@@ -99,12 +103,32 @@ func (d *Display) Run(ctx context.Context) error {
 	}
 }
 
-// Do runs fn on the display goroutine and waits for it.
-func (d *Display) Do(fn func()) {
+// Do runs fn on the display goroutine and waits for it. It returns false if
+// the display loop has stopped (fn was not run, or its run was not confirmed).
+// Do must not be called from the display goroutine: it would deadlock.
+func (d *Display) Do(fn func()) bool {
 	done := make(chan struct{})
-	d.calls <- func() { fn(); close(done) }
-	<-done
+	select {
+	case d.calls <- func() { fn(); close(done) }:
+	case <-d.stopped:
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-d.stopped:
+		// If both are ready, prefer confirmation of a completed call.
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
 }
+
+// Stopped is closed after Run returns and the display is destroyed.
+func (d *Display) Stopped() <-chan struct{} { return d.stopped }
 
 // LiveResources reports resources not yet destroyed. Display goroutine only.
 func LiveResources() int { return len(live.resources) }

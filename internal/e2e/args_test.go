@@ -139,7 +139,7 @@ func TestArgumentRoundtripAndPostError(t *testing.T) {
 	socket, d, _ := startServer(t)
 	requests := make(chan string, 1)
 	stringsReceived := make(chan string, 1)
-	d.Do(func() {
+	if !d.Do(func() {
 		if err := wayland.NewDataDeviceManagerGlobal(d, 1, func(c server.Client, v, id uint32) {
 			if _, e := wayland.NewDataDeviceManager(c, int32(v), id, managerHandler{stringsReceived, t}); e != nil {
 				t.Error(e)
@@ -164,7 +164,9 @@ func TestArgumentRoundtripAndPostError(t *testing.T) {
 		}); err != nil {
 			t.Error(err)
 		}
-	})
+	}) {
+		t.Fatal("display stopped")
+	}
 	c, err := wlturbo.Connect(socket)
 	must(t, err)
 	defer c.Close()
