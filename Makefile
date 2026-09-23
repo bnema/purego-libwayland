@@ -1,4 +1,7 @@
-.PHONY: test vet race check
+.PHONY: test vet race check generate
+
+generate:
+	CGO_ENABLED=0 go generate ./protocol
 
 test:
 	CGO_ENABLED=0 go test ./...

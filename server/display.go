@@ -5,20 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
-
-// Arg is one raw union wl_argument value (int, uint, fixed, object pointer,
-// new_id, or fd).
-type Arg uint64
-
-func Uint(v uint32) Arg           { return Arg(v) }
-func Int(v int32) Arg             { return Arg(uint32(v)) }
-func Object(r *Resource) Arg      { return Arg(r.c) }
-func (a Arg) Uint() uint32        { return uint32(a) }
-func (a Arg) Int() int32          { return int32(uint32(a)) }
-func (a Arg) NewID() uint32       { return uint32(a) }
-func (a Arg) Resource() *Resource { return live.resources[uintptr(a)] }
 
 // Handler receives every request sent to a resource.
 type Handler func(r *Resource, opcode uint32, args []Arg)
@@ -35,6 +26,10 @@ type Resource struct {
 	iface     *Interface
 	handler   Handler
 	OnDestroy func()
+	gone      bool
+
+	// Data holds the owner's state, typically the generated wrapper.
+	Data any
 }
 
 // live holds Go state reachable from C callbacks. It is only touched on the
@@ -128,24 +123,54 @@ func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Han
 func (r *Resource) ID() uint32        { return wlResourceGetID(r.c) }
 func (r *Resource) Version() int32    { return wlResourceGetVersion(r.c) }
 func (r *Resource) Client() Client    { return Client{wlResourceGetClient(r.c)} }
-func (r *Resource) Destroy()          { wlResourceDestroy(r.c) }
 func (r *Resource) Iface() *Interface { return r.iface }
 
-// PostEvent sends an event. String and array arguments are not supported yet.
+// Destroy frees the resource. It is a no-op once the resource is gone, so
+// generated destructor requests and handlers may both call it.
+func (r *Resource) Destroy() {
+	if !r.gone {
+		wlResourceDestroy(r.c)
+	}
+}
+
+// PostEvent sends an event. Arguments must match the event signature; build
+// string and array arguments with a Pinner and unpin it after this returns.
 func (r *Resource) PostEvent(opcode uint32, args ...Arg) {
 	var p unsafe.Pointer
 	if len(args) > 0 {
 		p = unsafe.Pointer(&args[0])
 	}
+	var pin runtime.Pinner
+	if p != nil {
+		pin.Pin(p)
+		defer pin.Unpin()
+	}
 	wlResourcePostEventArr(r.c, opcode, p)
 	runtime.KeepAlive(args)
+}
+
+// PostError sends a protocol error and disconnects the client.
+func (r *Resource) PostError(code uint32, msg string) {
+	// wl_resource_post_error takes a printf format; escape it and pass no
+	// variadic arguments (purego clears AL, as SysV varargs require).
+	b := append([]byte(strings.ReplaceAll(msg, "%", "%%")), 0)
+	var pin runtime.Pinner
+	pin.Pin(&b[0])
+	defer pin.Unpin()
+	wlResourcePostError(r.c, code, uintptr(unsafe.Pointer(&b[0])))
+	runtime.KeepAlive(b)
 }
 
 // implMarker is a non-nil implementation pointer. libwayland only passes it
 // back to our dispatcher.
 func implMarker() uintptr {
 	if marker == 0 {
+		tablesMu.Lock()
+		if err := tables.reserve(8); err != nil {
+			panic(err)
+		}
 		_, marker = tables.alloc(8)
+		tablesMu.Unlock()
 	}
 	return marker
 }
@@ -156,10 +181,12 @@ var marker uintptr
 
 func dispatch(_ uintptr, target uintptr, opcode uint32, msg unsafe.Pointer, args unsafe.Pointer) int32 {
 	r := live.resources[target]
+	sig := msgSignature(msg)
 	if r == nil || r.handler == nil {
+		closeRequestFDs(sig, args)
 		return 0
 	}
-	n := argCount(msgSignature(msg))
+	n := argCount(sig)
 	var a []Arg
 	if n > 0 {
 		a = append([]Arg(nil), unsafe.Slice((*Arg)(args), n)...)
@@ -171,7 +198,11 @@ func dispatch(_ uintptr, target uintptr, opcode uint32, msg unsafe.Pointer, args
 func destroyed(res uintptr) {
 	r := live.resources[res]
 	delete(live.resources, res)
-	if r != nil && r.OnDestroy != nil {
+	if r == nil {
+		return
+	}
+	r.gone = true
+	if r.OnDestroy != nil {
 		r.OnDestroy()
 	}
 }
@@ -190,6 +221,20 @@ func msgSignature(msg unsafe.Pointer) string {
 		n++
 	}
 	return string(unsafe.Slice((*byte)(p), n))
+}
+
+// closeRequestFDs takes ownership of fd arguments when there is no handler.
+func closeRequestFDs(sig string, args unsafe.Pointer) {
+	i := 0
+	for _, ch := range sig {
+		if ch == '?' || (ch >= '0' && ch <= '9') {
+			continue
+		}
+		if ch == 'h' {
+			_ = unix.Close((*Arg)(unsafe.Add(args, i*8)).Fd())
+		}
+		i++
+	}
 }
 
 // argCount counts arguments in a libwayland signature ("?oii", "2n", ...).

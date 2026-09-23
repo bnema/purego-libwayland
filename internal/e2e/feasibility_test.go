@@ -1,4 +1,4 @@
-package proto_test
+package e2e_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/purego-libwayland/internal/proto"
+	"github.com/bnema/purego-libwayland/protocol/wayland"
 	"github.com/bnema/purego-libwayland/server"
 	"github.com/bnema/wlturbo"
 	"golang.org/x/sys/unix"
@@ -18,9 +18,6 @@ import (
 // commits counts wl_surface.commit requests received by Go handlers.
 func startServer(t *testing.T) (socket string, d *server.Display, commits chan uint32) {
 	t.Helper()
-	if err := proto.Init(); err != nil {
-		t.Fatal(err)
-	}
 	d, err := server.NewDisplay()
 	if err != nil {
 		t.Fatal(err)
@@ -43,38 +40,10 @@ func startServer(t *testing.T) (socket string, d *server.Display, commits chan u
 
 	commits = make(chan uint32, 16)
 	var serial uint32
-	surface := func(r *server.Resource, op uint32, args []server.Arg) {
-		switch op {
-		case proto.SurfaceDestroy:
-			r.Destroy()
-		case proto.SurfaceFrame:
-			cb, err := r.Client().CreateResource(proto.Callback, 1, args[0].NewID(), nil)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			serial++
-			cb.PostEvent(proto.CallbackDone, server.Uint(serial))
-			cb.Destroy()
-		case proto.SurfaceCommit:
-			commits <- r.ID()
-		}
-	}
-	compositor := func(r *server.Resource, op uint32, args []server.Arg) {
-		iface, h := proto.Surface, server.Handler(surface)
-		if op == proto.CompositorCreateRegion {
-			iface, h = proto.Region, func(r *server.Resource, op uint32, _ []server.Arg) {
-				if op == proto.RegionDestroy {
-					r.Destroy()
-				}
-			}
-		}
-		if _, err := r.Client().CreateResource(iface, r.Version(), args[0].NewID(), h); err != nil {
-			t.Error(err)
-		}
-	}
-	err = d.CreateGlobal(proto.Compositor, 1, func(c server.Client, version, id uint32) {
-		if _, err := c.CreateResource(proto.Compositor, int32(version), id, compositor); err != nil {
+	surface := &surfaceHandler{commits: commits, serial: &serial, t: t}
+	compositor := &compositorHandler{surface: surface, t: t}
+	err = wayland.NewCompositorGlobal(d, 1, func(c server.Client, version, id uint32) {
+		if _, err := wayland.NewCompositor(c, int32(version), id, compositor); err != nil {
 			t.Error(err)
 		}
 	})
@@ -87,8 +56,13 @@ func startServer(t *testing.T) (socket string, d *server.Display, commits chan u
 	go func() { done <- d.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		if err := <-done; err != nil {
-			t.Error(err)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("server did not stop")
 		}
 	})
 	return socket, d, commits
@@ -135,14 +109,14 @@ func TestRequestEventRoundtripAndDisconnect(t *testing.T) {
 			t.Fatal(err)
 		}
 		surf := c.AllocateID()
-		must(t, c.SendRequest(comp, proto.CompositorCreateSurface, surf))
+		must(t, c.SendRequest(comp, uint16(wayland.CompositorRequestCreateSurface), surf))
 		cb := c.AllocateID()
 		gotDone := make(chan uint32, 1)
 		cbProxy := &doneProxy{done: gotDone}
 		cbProxy.SetID(cb)
 		c.Context().Register(cbProxy)
-		must(t, c.SendRequest(surf, proto.SurfaceFrame, cb))
-		must(t, c.SendRequest(surf, proto.SurfaceCommit))
+		must(t, c.SendRequest(surf, uint16(wayland.SurfaceRequestFrame), cb))
+		must(t, c.SendRequest(surf, uint16(wayland.SurfaceRequestCommit)))
 		must(t, c.Roundtrip())
 
 		select {
@@ -186,7 +160,7 @@ type doneProxy struct {
 }
 
 func (p *doneProxy) Dispatch(e *wlturbo.Event) {
-	if e.Opcode == proto.CallbackDone {
+	if e.Opcode == uint16(wayland.CallbackEventDone) {
 		p.done <- e.Uint32()
 	}
 }
@@ -197,3 +171,54 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+type compositorHandler struct {
+	surface *surfaceHandler
+	t       *testing.T
+}
+
+func (h *compositorHandler) CreateSurface(self *wayland.Compositor, id uint32) {
+	if _, err := wayland.NewSurface(self.Client(), self.Version(), id, h.surface); err != nil {
+		h.t.Error(err)
+	}
+}
+func (h *compositorHandler) CreateRegion(self *wayland.Compositor, id uint32) {
+	if _, err := wayland.NewRegion(self.Client(), self.Version(), id, regionHandler{}); err != nil {
+		h.t.Error(err)
+	}
+}
+func (*compositorHandler) Release(*wayland.Compositor) {}
+
+type regionHandler struct{}
+
+func (regionHandler) Destroy(*wayland.Region)                              {}
+func (regionHandler) Add(*wayland.Region, int32, int32, int32, int32)      {}
+func (regionHandler) Subtract(*wayland.Region, int32, int32, int32, int32) {}
+
+type surfaceHandler struct {
+	commits chan uint32
+	serial  *uint32
+	t       *testing.T
+}
+
+func (*surfaceHandler) Destroy(*wayland.Surface)                               {}
+func (*surfaceHandler) Attach(*wayland.Surface, *wayland.Buffer, int32, int32) {}
+func (*surfaceHandler) Damage(*wayland.Surface, int32, int32, int32, int32)    {}
+func (h *surfaceHandler) Frame(self *wayland.Surface, id uint32) {
+	cb, err := wayland.NewCallback(self.Client(), 1, id, nil)
+	if err != nil {
+		h.t.Error(err)
+		return
+	}
+	*h.serial++
+	cb.SendDone(*h.serial)
+	cb.Destroy()
+}
+func (*surfaceHandler) SetOpaqueRegion(*wayland.Surface, *wayland.Region)         {}
+func (*surfaceHandler) SetInputRegion(*wayland.Surface, *wayland.Region)          {}
+func (h *surfaceHandler) Commit(self *wayland.Surface)                            { h.commits <- self.ID() }
+func (*surfaceHandler) SetBufferTransform(*wayland.Surface, int32)                {}
+func (*surfaceHandler) SetBufferScale(*wayland.Surface, int32)                    {}
+func (*surfaceHandler) DamageBuffer(*wayland.Surface, int32, int32, int32, int32) {}
+func (*surfaceHandler) Offset(*wayland.Surface, int32, int32)                     {}
+func (*surfaceHandler) GetRelease(*wayland.Surface, uint32)                       {}
