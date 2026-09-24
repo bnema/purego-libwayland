@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"golang.org/x/sys/unix"
+	"os"
 	"testing"
 	"time"
 	"unsafe"
@@ -133,4 +134,52 @@ func TestCloseBeforeRun(t *testing.T) {
 	}
 	d.Close()
 	d.Close()
+}
+
+// Do must not wait for the dispatch timeout: a compositor sends one call per
+// pointer event, at up to 1000 per second.
+func TestDoLatency(t *testing.T) {
+	d, err := NewDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() { returned <- d.Run(ctx) }()
+	defer func() { cancel(); <-returned }()
+	start := time.Now()
+	for range 1000 {
+		if !d.Do(func() {}) {
+			t.Fatal("Do failed")
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("1000 calls took %v", elapsed)
+	}
+}
+
+func TestCloseReleasesFDs(t *testing.T) {
+	count := func() int {
+		es, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skip(err)
+		}
+		return len(es)
+	}
+	d, err := NewDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close() // first display loads the library; measure the next ones
+	before := count()
+	for range 3 {
+		d, err := NewDisplay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Close()
+	}
+	if after := count(); after != before {
+		t.Fatalf("fd leak: %d -> %d", before, after)
+	}
 }

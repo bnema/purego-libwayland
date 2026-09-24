@@ -43,10 +43,16 @@ var live = struct {
 
 // Display owns a wl_display. All methods except Do must run on the goroutine
 // that calls Run, or before Run starts.
+// Do wakes the loop through an eventfd so calls run at once instead of after
+// the dispatch timeout.
 type Display struct {
-	c       uintptr
-	loop    uintptr
-	calls   chan func()
+	c     uintptr
+	loop  uintptr
+	calls chan func()
+	wake  int
+	// wakeSrc owns libwayland's duplicate of wake; only removing the source
+	// closes it, destroying the display does not.
+	wakeSrc uintptr
 	stopped chan struct{}
 	state   atomic.Uint32
 }
@@ -59,7 +65,19 @@ func NewDisplay() (*Display, error) {
 	if c == 0 {
 		return nil, errors.New("purego-libwayland: wl_display_create failed")
 	}
-	return &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func()), stopped: make(chan struct{})}, nil
+	wake, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		wlDisplayDestroy(c)
+		return nil, fmt.Errorf("purego-libwayland: eventfd: %w", err)
+	}
+	d := &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func(), 64), wake: wake, stopped: make(chan struct{})}
+	// The callback only drains the counter; Run then executes queued calls.
+	if d.wakeSrc = wlEventLoopAddFD(d.loop, int32(wake), 1 /* WL_EVENT_READABLE */, cbWake, 0); d.wakeSrc == 0 {
+		unix.Close(wake)
+		wlDisplayDestroy(c)
+		return nil, errors.New("purego-libwayland: wl_event_loop_add_fd failed")
+	}
+	return d, nil
 }
 
 // AddSocketFD serves clients on an already bound, listening unix socket.
@@ -87,9 +105,16 @@ func (d *Display) Close() {
 	if !d.state.CompareAndSwap(0, 1) {
 		return
 	}
-	wlDisplayDestroyClients(d.c)
-	wlDisplayDestroy(d.c)
+	d.destroy()
 	close(d.stopped)
+}
+
+// destroy frees the display and the wake-up fds.
+func (d *Display) destroy() {
+	wlDisplayDestroyClients(d.c)
+	wlEventSourceRemove(d.wakeSrc)
+	wlDisplayDestroy(d.c)
+	unix.Close(d.wake)
 }
 
 // Run dispatches libwayland on one OS-locked goroutine until ctx is done.
@@ -100,19 +125,24 @@ func (d *Display) Run(ctx context.Context) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(d.stopped)
-	defer func() {
-		wlDisplayDestroyClients(d.c)
-		wlDisplayDestroy(d.c)
-	}()
+	defer d.destroy()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil
-		case fn := <-d.calls:
-			fn()
-		default:
 		}
-		if wlEventLoopDispatch(d.loop, 5) < 0 {
+		// Run every queued call; each Do also wrote the eventfd.
+	drain:
+		for {
+			select {
+			case fn := <-d.calls:
+				fn()
+			default:
+				break drain
+			}
+		}
+		wlDisplayFlushClients(d.c)
+		// The timeout only bounds how late ctx cancellation is seen.
+		if wlEventLoopDispatch(d.loop, 100) < 0 {
 			return errors.New("purego-libwayland: wl_event_loop_dispatch failed")
 		}
 		wlDisplayFlushClients(d.c)
@@ -129,6 +159,8 @@ func (d *Display) Do(fn func()) bool {
 	case <-d.stopped:
 		return false
 	}
+	var one = [8]byte{1}
+	_, _ = unix.Write(d.wake, one[:])
 	select {
 	case <-done:
 		return true
@@ -269,6 +301,13 @@ func destroyed(res uintptr) {
 	if r.OnDestroy != nil {
 		r.OnDestroy()
 	}
+}
+
+// wake drains a Display's eventfd (wl_event_loop_fd_func_t).
+func wake(fd int32, mask uint32, data uintptr) int32 {
+	var buf [8]byte
+	_, _ = unix.Read(int(fd), buf[:])
+	return 0
 }
 
 func bind(client uintptr, data uintptr, version uint32, id uint32) {
