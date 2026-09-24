@@ -181,6 +181,18 @@ func (d *Display) Stopped() <-chan struct{} { return d.stopped }
 // LiveResources reports resources not yet destroyed. Display goroutine only.
 func LiveResources() int { return len(live.resources) }
 
+// PID is the process ID of the client, read from the socket credentials
+// (SO_PEERCRED) when it connected. Zero for an invalid client.
+// Display goroutine only.
+func (c Client) PID() int {
+	if c.c == 0 {
+		return 0
+	}
+	var pid, uid, gid int32
+	wlClientGetCredentials(c.c, unsafe.Pointer(&pid), unsafe.Pointer(&uid), unsafe.Pointer(&gid))
+	return int(pid)
+}
+
 func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Handler) (*Resource, error) {
 	rc := wlResourceCreate(c.c, iface.c, version, id)
 	if rc == 0 {

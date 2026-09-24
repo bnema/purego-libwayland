@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -292,3 +293,31 @@ func (*surfaceHandler) SetBufferScale(*wayland.Surface, int32)                  
 func (*surfaceHandler) DamageBuffer(*wayland.Surface, int32, int32, int32, int32) {}
 func (*surfaceHandler) Offset(*wayland.Surface, int32, int32)                     {}
 func (*surfaceHandler) GetRelease(*wayland.Surface, uint32)                       {}
+
+// The client PID comes from the socket credentials; in-process clients share ours.
+func TestClientPID(t *testing.T) {
+	captured := make(chan *server.Resource, 1)
+	socket, d, _ := startServer(t, captured)
+	c, err := wlturbo.Connect(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	must(t, c.Roundtrip())
+	g, ok := c.Registry().FindGlobal("wl_compositor")
+	if !ok {
+		t.Fatal("wl_compositor not advertised")
+	}
+	comp, err := c.Registry().BindID(g.Name, g.Interface, 1)
+	must(t, err)
+	must(t, c.SendRequest(comp, uint16(wayland.CompositorRequestCreateSurface), c.AllocateID()))
+	must(t, c.Roundtrip())
+	r := receive(t, captured)
+	pid := make(chan int, 1)
+	if !d.Do(func() { pid <- r.Client().PID() }) {
+		t.Fatal("display stopped")
+	}
+	if got := <-pid; got != os.Getpid() {
+		t.Fatalf("pid %d, want %d", got, os.Getpid())
+	}
+}
