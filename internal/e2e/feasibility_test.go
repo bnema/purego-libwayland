@@ -321,3 +321,35 @@ func TestClientPID(t *testing.T) {
 		t.Fatalf("pid %d, want %d", got, os.Getpid())
 	}
 }
+
+// A removed global disappears from the registry of new clients.
+func TestGlobalRemove(t *testing.T) {
+	socket, d, _ := startServer(t)
+	var g *server.Global
+	added := make(chan error, 1)
+	if !d.Do(func() {
+		var err error
+		g, err = d.AddGlobal(wayland.OutputInterface, 4, func(server.Client, uint32, uint32) {})
+		added <- err
+	}) {
+		t.Fatal("display stopped")
+	}
+	must(t, <-added)
+	has := func() bool {
+		c, err := wlturbo.Connect(socket)
+		must(t, err)
+		defer c.Close()
+		must(t, c.Roundtrip())
+		_, ok := c.Registry().FindGlobal("wl_output")
+		return ok
+	}
+	if !has() {
+		t.Fatal("wl_output not advertised")
+	}
+	if !d.Do(func() { g.Remove(); g.Remove() }) {
+		t.Fatal("display stopped")
+	}
+	if has() {
+		t.Fatal("wl_output still advertised after Remove")
+	}
+}

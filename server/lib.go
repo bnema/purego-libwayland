@@ -21,6 +21,7 @@ var (
 	wlEventLoopAddFD        func(loop uintptr, fd int32, mask uint32, fn, data uintptr) uintptr
 	wlEventSourceRemove     func(source uintptr) int32
 	wlGlobalCreate          func(display, iface uintptr, version int32, data uintptr, bind uintptr) uintptr
+	wlGlobalRemove          func(global uintptr)
 	wlResourceCreate        func(client, iface uintptr, version int32, id uint32) uintptr
 	wlResourceSetDispatcher func(resource, dispatcher, impl, data, destroy uintptr)
 	wlResourcePostEventArr  func(resource uintptr, opcode uint32, args unsafe.Pointer)
@@ -68,6 +69,7 @@ func load() error {
 		reg(&wlEventLoopAddFD, "wl_event_loop_add_fd")
 		reg(&wlEventSourceRemove, "wl_event_source_remove")
 		reg(&wlGlobalCreate, "wl_global_create")
+		reg(&wlGlobalRemove, "wl_global_remove")
 		reg(&wlResourceCreate, "wl_resource_create")
 		reg(&wlResourceSetDispatcher, "wl_resource_set_dispatcher")
 		reg(&wlResourcePostEventArr, "wl_resource_post_event_array")
