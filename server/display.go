@@ -89,14 +89,38 @@ func (d *Display) AddSocketFD(fd int) error {
 }
 
 func (d *Display) CreateGlobal(iface *Interface, version int32, bindFn BindFunc) error {
+	_, err := d.AddGlobal(iface, version, bindFn)
+	return err
+}
+
+// Global is a global that can be withdrawn, such as a wl_output on hotplug.
+type Global struct{ c uintptr }
+
+// AddGlobal advertises a global and returns a handle to remove it later.
+func (d *Display) AddGlobal(iface *Interface, version int32, bindFn BindFunc) (*Global, error) {
 	live.nextBind++
 	token := live.nextBind
 	live.binds[token] = bindFn
-	if wlGlobalCreate(d.c, iface.c, version, token, cbBind) == 0 {
+	c := wlGlobalCreate(d.c, iface.c, version, token, cbBind)
+	if c == 0 {
 		delete(live.binds, token)
-		return fmt.Errorf("purego-libwayland: wl_global_create(%s) failed", iface.Name)
+		return nil, fmt.Errorf("purego-libwayland: wl_global_create(%s) failed", iface.Name)
 	}
-	return nil
+	return &Global{c: c}, nil
+}
+
+// Remove withdraws the global: clients get wl_registry.global_remove.
+// Existing resources stay valid. A client that binds before it sees the
+// removal still gets its bind function called, so it always receives a
+// resource (the protocol allows binding a just-removed global); the bind
+// function should then send inert state. The global is freed with the
+// display. Display goroutine only; idempotent.
+func (g *Global) Remove() {
+	if g == nil || g.c == 0 {
+		return
+	}
+	wlGlobalRemove(g.c)
+	g.c = 0
 }
 
 // Close destroys a display that has not started Run. It is a no-op once Run
