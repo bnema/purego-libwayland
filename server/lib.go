@@ -29,6 +29,7 @@ var (
 	wlResourceGetID         func(resource uintptr) uint32
 	wlResourceGetClient     func(resource uintptr) uintptr
 	wlResourceGetVersion    func(resource uintptr) int32
+	wlClientGetCredentials  func(client uintptr, pid, uid, gid unsafe.Pointer)
 )
 
 var (
@@ -75,6 +76,7 @@ func load() error {
 		reg(&wlResourceGetID, "wl_resource_get_id")
 		reg(&wlResourceGetClient, "wl_resource_get_client")
 		reg(&wlResourceGetVersion, "wl_resource_get_version")
+		reg(&wlClientGetCredentials, "wl_client_get_credentials")
 
 		cbDispatcher = purego.NewCallback(dispatch)
 		cbDestroy = purego.NewCallback(destroyed)
