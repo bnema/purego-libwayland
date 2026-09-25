@@ -9,3 +9,4 @@ package protocol
 //go:generate go run ../cmd/wlgen -package viewporter -out viewporter/viewporter.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/viewporter.xml
 //go:generate go run ../cmd/wlgen -package fractionalscale -out fractionalscale/fractionalscale.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/fractional-scale-v1.xml
 //go:generate go run ../cmd/wlgen -package linuxdmabuf -out linuxdmabuf/linuxdmabuf.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/linux-dmabuf-v1.xml
+//go:generate go run ../cmd/wlgen -package kdedecoration -out kdedecoration/kdedecoration.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/server-decoration.xml
