@@ -8,3 +8,4 @@ package protocol
 //go:generate go run ../cmd/wlgen -package xdgdecoration -out xdgdecoration/xdgdecoration.go -import xdgshell=github.com/bnema/purego-libwayland/protocol/xdgshell -import-xml xdgshell=../protocols/xdg-shell.xml ../protocols/xdg-decoration-unstable-v1.xml
 //go:generate go run ../cmd/wlgen -package viewporter -out viewporter/viewporter.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/viewporter.xml
 //go:generate go run ../cmd/wlgen -package fractionalscale -out fractionalscale/fractionalscale.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/fractional-scale-v1.xml
+//go:generate go run ../cmd/wlgen -package linuxdmabuf -out linuxdmabuf/linuxdmabuf.go -import wayland=github.com/bnema/purego-libwayland/protocol/wayland -import-xml wayland=../protocols/wayland.xml ../protocols/linux-dmabuf-v1.xml
