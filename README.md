@@ -18,8 +18,8 @@ CGO_ENABLED=0 go build ./...
 
 ## Protocol generation
 
-Vendored protocol XML lives in `protocols/`. Run `make generate` to regenerate the Go packages in `protocol/`.
+Vendored protocol XML lives in `protocols/`. Run `make generate` to regenerate the Go packages in `protocol/`. Each XML file keeps the copyright and license of its upstream project (wayland, wayland-protocols, wlr-protocols, KDE).
 
 ## License
 
-MIT.
+MIT, see `LICENSE`. Vendored protocol XML files keep their own licenses.
