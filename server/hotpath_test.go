@@ -64,6 +64,23 @@ func hotDisplay(t testing.TB, iface *Interface, h Handler) (*Display, *Resource)
 	return d, hotResource(t, d, iface, h)
 }
 
+func TestServerAllocatedResourceID(t *testing.T) {
+	iface := &Interface{Name: "server_allocated_id_test", Version: 1}
+	d, existing := hotDisplay(t, iface, nil)
+	if !d.Do(func() {
+		r, err := (Client{existing.client}).CreateResource(iface, 1, 0, nil)
+		if err != nil {
+			t.Errorf("create server-side resource: %v", err)
+			return
+		}
+		if r.ID() == 0 || r.ID() != wlResourceGetID(r.c) {
+			t.Errorf("resource ID = %d, libwayland ID = %d", r.ID(), wlResourceGetID(r.c))
+		}
+	}) {
+		t.Fatal("display stopped")
+	}
+}
+
 func requestMessage(iface *Interface) unsafe.Pointer {
 	return *(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&tables.mem[0]), iface.c-tables.base+16))
 }

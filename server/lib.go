@@ -28,8 +28,8 @@ var (
 	loadOnce sync.Once
 	loadErr  error
 
-	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate       uintptr
-	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy uintptr
+	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate                         uintptr
+	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy, symResourceGetID uintptr
 
 	// Shared C callbacks. purego callbacks are never freed, so there is one
 	// of each for the whole process.
@@ -71,6 +71,7 @@ func load() error {
 			{"wl_display_flush_clients", &symDisplayFlushClients},
 			{"wl_event_loop_dispatch", &symEventLoopDispatch},
 			{"wl_resource_create", &symResourceCreate},
+			{"wl_resource_get_id", &symResourceGetID},
 			{"wl_resource_set_dispatcher", &symResourceSetDispatcher},
 			{"wl_resource_post_event_array", &symResourcePostEventArr},
 			{"wl_resource_destroy", &symResourceDestroy},
@@ -108,6 +109,11 @@ func wlResourceCreate(client, iface uintptr, version int32, id uint32) uintptr {
 	callArgs[0], callArgs[1], callArgs[2], callArgs[3] = client, iface, uintptr(version), uintptr(id)
 	r, _, _ := purego.SyscallN(symResourceCreate, callArgs[:4]...)
 	return r
+}
+func wlResourceGetID(resource uintptr) uint32 {
+	callArgs[0] = resource
+	r, _, _ := purego.SyscallN(symResourceGetID, callArgs[:1]...)
+	return uint32(r)
 }
 func wlResourceSetDispatcher(resource, dispatcher, impl, data, destroy uintptr) {
 	callArgs[0], callArgs[1], callArgs[2], callArgs[3], callArgs[4] = resource, dispatcher, impl, data, destroy

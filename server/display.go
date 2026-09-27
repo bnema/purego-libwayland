@@ -226,6 +226,10 @@ func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Han
 	if rc == 0 {
 		return nil, fmt.Errorf("purego-libwayland: wl_resource_create(%s) failed", iface.Name)
 	}
+	// id 0 asks libwayland to allocate a server-side ID.
+	if id == 0 {
+		id = wlResourceGetID(rc)
+	}
 	r := &Resource{c: rc, id: id, version: version, client: c.c, iface: iface, handler: h}
 	live.resources[rc] = r
 	wlResourceSetDispatcher(rc, cbDispatcher, implMarker(), 0, cbDestroy)
