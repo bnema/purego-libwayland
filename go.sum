@@ -1,5 +1,5 @@
-github.com/bnema/purego v0.11.0-bnema.4 h1:uQjx9QtM945rD6HkwYzPGuVN7wKr5HrFKIWE3kRprbs=
-github.com/bnema/purego v0.11.0-bnema.4/go.mod h1:LHW8Sb4QO18dQaLVRU8tZCGM0SjsC+agFW/3M3nCUtg=
+github.com/bnema/purego v0.12.0-bnema.1 h1:/jQhDj74geYzFg57t6qDvTc2PbU5uEsM93YgzVXJenI=
+github.com/bnema/purego v0.12.0-bnema.1/go.mod h1:xS1iX3noypxnbOUEUAqOvkfnUzgHuu19VtL4+dfUMJM=
 github.com/bnema/wlturbo v0.2.0 h1:gZPe81TrrrYW8xrbZpEvZnDI7VQBm60+dgAapbXJyRQ=
 github.com/bnema/wlturbo v0.2.0/go.mod h1:4i1k1wyw7FDWOkh2hg1ZwPfrPRn3+E6WrYg9Qrt74CA=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
