@@ -12,7 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Handler receives every request sent to a resource.
+// Handler receives every request sent to a resource. args borrows libwayland's
+// argument array and must not be retained after the handler returns.
 type Handler func(r *Resource, opcode uint32, args []Arg)
 
 // BindFunc runs when a client binds a global.
@@ -24,6 +25,9 @@ type Client struct{ c uintptr }
 // Resource is a server-side wl_resource.
 type Resource struct {
 	c         uintptr
+	id        uint32
+	version   int32
+	client    uintptr
 	iface     *Interface
 	handler   Handler
 	OnDestroy func()
@@ -222,7 +226,7 @@ func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Han
 	if rc == 0 {
 		return nil, fmt.Errorf("purego-libwayland: wl_resource_create(%s) failed", iface.Name)
 	}
-	r := &Resource{c: rc, iface: iface, handler: h}
+	r := &Resource{c: rc, id: id, version: version, client: c.c, iface: iface, handler: h}
 	live.resources[rc] = r
 	wlResourceSetDispatcher(rc, cbDispatcher, implMarker(), 0, cbDestroy)
 	return r, nil
@@ -233,19 +237,19 @@ func (r *Resource) ID() uint32 {
 	if r.gone {
 		return 0
 	}
-	return wlResourceGetID(r.c)
+	return r.id
 }
 func (r *Resource) Version() int32 {
 	if r.gone {
 		return 0
 	}
-	return wlResourceGetVersion(r.c)
+	return r.version
 }
 func (r *Resource) Client() Client {
 	if r.gone {
 		return Client{}
 	}
-	return Client{wlResourceGetClient(r.c)}
+	return Client{r.client}
 }
 func (r *Resource) Iface() *Interface { return r.iface }
 
@@ -267,11 +271,6 @@ func (r *Resource) PostEvent(opcode uint32, args ...Arg) {
 	var p unsafe.Pointer
 	if len(args) > 0 {
 		p = unsafe.Pointer(&args[0])
-	}
-	var pin runtime.Pinner
-	if p != nil {
-		pin.Pin(p)
-		defer pin.Unpin()
 	}
 	wlResourcePostEventArr(r.c, opcode, p)
 	runtime.KeepAlive(args)
@@ -311,17 +310,19 @@ var marker uintptr
 
 // --- C callbacks (display goroutine) ---
 
-func dispatch(_ uintptr, target uintptr, opcode uint32, msg unsafe.Pointer, args unsafe.Pointer) int32 {
+func dispatch(_ uintptr, target uintptr, opcode uint32, _ unsafe.Pointer, args unsafe.Pointer) int32 {
 	r := live.resources[target]
-	sig := msgSignature(msg)
-	if r == nil || r.handler == nil {
-		closeRequestFDs(sig, args)
+	if r == nil || opcode >= uint32(len(r.iface.Requests)) {
 		return 0
 	}
-	n := argCount(sig)
+	m := &r.iface.Requests[opcode]
+	if r.handler == nil {
+		closeRequestFDs(m.fdPositions, args)
+		return 0
+	}
 	var a []Arg
-	if n > 0 {
-		a = append([]Arg(nil), unsafe.Slice((*Arg)(args), n)...)
+	if m.argc > 0 {
+		a = unsafe.Slice((*Arg)(args), m.argc)
 	}
 	r.handler(r, opcode, a)
 	return 0
@@ -352,27 +353,10 @@ func bind(client uintptr, data uintptr, version uint32, id uint32) {
 	}
 }
 
-// msgSignature reads wl_message.signature.
-func msgSignature(msg unsafe.Pointer) string {
-	p := *(*unsafe.Pointer)(unsafe.Add(msg, 8))
-	n := 0
-	for *(*byte)(unsafe.Add(p, n)) != 0 {
-		n++
-	}
-	return string(unsafe.Slice((*byte)(p), n))
-}
-
 // closeRequestFDs takes ownership of fd arguments when there is no handler.
-func closeRequestFDs(sig string, args unsafe.Pointer) {
-	i := 0
-	for _, ch := range sig {
-		if ch == '?' || (ch >= '0' && ch <= '9') {
-			continue
-		}
-		if ch == 'h' {
-			_ = unix.Close((*Arg)(unsafe.Add(args, i*8)).Fd())
-		}
-		i++
+func closeRequestFDs(positions []int, args unsafe.Pointer) {
+	for _, i := range positions {
+		_ = unix.Close((*Arg)(unsafe.Add(args, i*8)).Fd())
 	}
 }
 

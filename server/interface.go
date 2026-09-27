@@ -10,6 +10,9 @@ type Message struct {
 	Name      string
 	Signature string
 	Types     []*Interface
+
+	argc        int
+	fdPositions []int
 }
 
 // Interface describes a protocol interface. Build its C table once with
@@ -55,6 +58,21 @@ func NewInterfaces(ifaces ...*Interface) error {
 	}
 	// Pass 2: fill messages and headers.
 	for i, it := range ifaces {
+		for j := range it.Requests {
+			m := &it.Requests[j]
+			m.argc = argCount(m.Signature)
+			m.fdPositions = nil
+			pos := 0
+			for _, ch := range m.Signature {
+				if ch == '?' || (ch >= '0' && ch <= '9') {
+					continue
+				}
+				if ch == 'h' {
+					m.fdPositions = append(m.fdPositions, pos)
+				}
+				pos++
+			}
+		}
 		o := offs[i]
 		a.putPtr(o, a.cstring(it.Name))
 		a.putI32(o+8, it.Version)

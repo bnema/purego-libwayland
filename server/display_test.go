@@ -27,7 +27,11 @@ func TestNoHandlerClosesFDs(t *testing.T) {
 			}
 			i++
 		}
-		closeRequestFDs(sig, unsafe.Pointer(&args[0]))
+		iface := &Interface{Name: "test_fd", Version: 1, Requests: []Message{{Name: "fd", Signature: sig}}}
+		if err := NewInterfaces(iface); err != nil {
+			t.Fatal(err)
+		}
+		closeRequestFDs(iface.Requests[0].fdPositions, unsafe.Pointer(&args[0]))
 		if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0); err != unix.EBADF {
 			t.Fatalf("signature %s: fd not closed: %v", sig, err)
 		}
