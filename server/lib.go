@@ -83,47 +83,48 @@ func load() error {
 			}
 		}
 
-		cbDispatcher = purego.NewCallback(dispatch)
-		cbDestroy = purego.NewCallback(destroyed)
-		cbBind = purego.NewCallback(bind)
-		cbWake = purego.NewCallback(wake)
+		cbDispatcher = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			// C memory owned by libwayland; reinterpret pointer bits without uintptr-to-pointer conversion.
+			msg, args := a.Int(3), a.Int(4)
+			return uintptr(uint32(dispatch(a.Int(0), a.Int(1), uint32(a.Int(2)), *(*unsafe.Pointer)(unsafe.Pointer(&msg)), *(*unsafe.Pointer)(unsafe.Pointer(&args)))))
+		})
+		cbDestroy = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			destroyed(a.Int(0))
+			return 0
+		})
+		cbBind = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			bind(a.Int(0), a.Int(1), uint32(a.Int(2)), uint32(a.Int(3)))
+			return 0
+		})
+		cbWake = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			return uintptr(uint32(wake(int32(a.Int(0)), uint32(a.Int(1)), a.Int(2))))
+		})
 	})
 	return loadErr
 }
 
-// callArgs is scratch for SyscallN so hot calls do not allocate a variadic
-// slice. Display goroutine only; all libwayland calls run there.
-var callArgs [6]uintptr
-
 // Integer and pointer-only entry points avoid RegisterLibFunc's reflective call path.
 func wlDisplayFlushClients(display uintptr) {
-	callArgs[0] = display
-	purego.SyscallN(symDisplayFlushClients, callArgs[:1]...)
+	purego.Syscall6(symDisplayFlushClients, display, 0, 0, 0, 0, 0)
 }
 func wlEventLoopDispatch(loop uintptr, timeout int32) int32 {
-	callArgs[0], callArgs[1] = loop, uintptr(timeout)
-	r, _, _ := purego.SyscallN(symEventLoopDispatch, callArgs[:2]...)
+	r, _, _ := purego.Syscall6(symEventLoopDispatch, loop, uintptr(timeout), 0, 0, 0, 0)
 	return int32(r)
 }
 func wlResourceCreate(client, iface uintptr, version int32, id uint32) uintptr {
-	callArgs[0], callArgs[1], callArgs[2], callArgs[3] = client, iface, uintptr(version), uintptr(id)
-	r, _, _ := purego.SyscallN(symResourceCreate, callArgs[:4]...)
+	r, _, _ := purego.Syscall6(symResourceCreate, client, iface, uintptr(version), uintptr(id), 0, 0)
 	return r
 }
 func wlResourceGetID(resource uintptr) uint32 {
-	callArgs[0] = resource
-	r, _, _ := purego.SyscallN(symResourceGetID, callArgs[:1]...)
+	r, _, _ := purego.Syscall6(symResourceGetID, resource, 0, 0, 0, 0, 0)
 	return uint32(r)
 }
 func wlResourceSetDispatcher(resource, dispatcher, impl, data, destroy uintptr) {
-	callArgs[0], callArgs[1], callArgs[2], callArgs[3], callArgs[4] = resource, dispatcher, impl, data, destroy
-	purego.SyscallN(symResourceSetDispatcher, callArgs[:5]...)
+	purego.Syscall6(symResourceSetDispatcher, resource, dispatcher, impl, data, destroy, 0)
 }
 func wlResourcePostEventArr(resource uintptr, opcode uint32, args unsafe.Pointer) {
-	callArgs[0], callArgs[1], callArgs[2] = resource, uintptr(opcode), uintptr(args)
-	purego.SyscallN(symResourcePostEventArr, callArgs[:3]...)
+	purego.Syscall6(symResourcePostEventArr, resource, uintptr(opcode), uintptr(args), 0, 0, 0)
 }
 func wlResourceDestroy(resource uintptr) {
-	callArgs[0] = resource
-	purego.SyscallN(symResourceDestroy, callArgs[:1]...)
+	purego.Syscall6(symResourceDestroy, resource, 0, 0, 0, 0, 0)
 }
