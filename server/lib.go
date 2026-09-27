@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/bnema/purego"
+	"golang.org/x/sys/unix"
 )
 
 // libwayland-server entry points. Only non-varargs functions are bound.
@@ -30,6 +31,7 @@ var (
 
 	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate                         uintptr
 	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy, symResourceGetID uintptr
+	symErrnoLocation                                                                        uintptr
 
 	// Shared C callbacks. purego callbacks are never freed, so there is one
 	// of each for the whole process.
@@ -82,6 +84,19 @@ func load() error {
 				return
 			}
 		}
+		symErrnoLocation, err = purego.Dlsym(lib, "__errno_location")
+		if err != nil {
+			libc, openErr := purego.Dlopen("libc.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			if openErr != nil {
+				loadErr = fmt.Errorf("purego-libwayland: open libc.so.6: %w", openErr)
+				return
+			}
+			symErrnoLocation, err = purego.Dlsym(libc, "__errno_location")
+			if err != nil {
+				loadErr = fmt.Errorf("purego-libwayland: resolve __errno_location: %w", err)
+				return
+			}
+		}
 
 		cbDispatcher = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
 			// C memory owned by libwayland; reinterpret pointer bits without uintptr-to-pointer conversion.
@@ -110,6 +125,11 @@ func wlDisplayFlushClients(display uintptr) {
 func wlEventLoopDispatch(loop uintptr, timeout int32) int32 {
 	r, _, _ := purego.Syscall6(symEventLoopDispatch, loop, uintptr(timeout), 0, 0, 0, 0)
 	return int32(r)
+}
+func lastErrno() unix.Errno {
+	p, _, _ := purego.Syscall6(symErrnoLocation, 0, 0, 0, 0, 0, 0)
+	// C memory owned by libc; reinterpret pointer bits without uintptr-to-pointer conversion.
+	return unix.Errno(**(**int32)(unsafe.Pointer(&p)))
 }
 func wlResourceCreate(client, iface uintptr, version int32, id uint32) uintptr {
 	r, _, _ := purego.Syscall6(symResourceCreate, client, iface, uintptr(version), uintptr(id), 0, 0)

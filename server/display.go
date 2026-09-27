@@ -154,6 +154,7 @@ func (d *Display) Run(ctx context.Context) error {
 	defer runtime.UnlockOSThread()
 	defer close(d.stopped)
 	defer d.destroy()
+	consecutiveFailures := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -171,8 +172,15 @@ func (d *Display) Run(ctx context.Context) error {
 		wlDisplayFlushClients(d.c)
 		// The timeout only bounds how late ctx cancellation is seen.
 		if wlEventLoopDispatch(d.loop, 100) < 0 {
-			return errors.New("purego-libwayland: wl_event_loop_dispatch failed")
+			errno := lastErrno()
+			consecutiveFailures++
+			// epoll_wait is interrupted by Go's preemption signals (EINTR); a persistent failure (EBADF, EINVAL) repeats.
+			if consecutiveFailures < 16 {
+				continue
+			}
+			return fmt.Errorf("purego-libwayland: wl_event_loop_dispatch failed %d times in a row: %w", consecutiveFailures, errno)
 		}
+		consecutiveFailures = 0
 		wlDisplayFlushClients(d.c)
 	}
 }
