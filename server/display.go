@@ -261,6 +261,12 @@ func (r *Resource) Destroy() {
 	}
 }
 
+// eventArgs holds the wl_argument array of the event being posted.
+// libwayland copies it before wl_resource_post_event_array returns.
+// Display goroutine only; post_event_array does not call back into Go, so
+// PostEvent is not re-entrant. No protocol event has more than 8 arguments.
+var eventArgs [16]Arg
+
 // PostEvent sends an event. Arguments must match the event signature; build
 // string and array arguments with a Pinner and unpin it after this returns.
 // Calling it after destruction is safe and does nothing.
@@ -268,12 +274,15 @@ func (r *Resource) PostEvent(opcode uint32, args ...Arg) {
 	if r.gone {
 		return
 	}
+	if len(args) > len(eventArgs) {
+		panic("purego-libwayland: too many event arguments")
+	}
 	var p unsafe.Pointer
 	if len(args) > 0 {
-		p = unsafe.Pointer(&args[0])
+		copy(eventArgs[:], args)
+		p = unsafe.Pointer(&eventArgs[0])
 	}
 	wlResourcePostEventArr(r.c, opcode, p)
-	runtime.KeepAlive(args)
 }
 
 // PostError sends a protocol error and disconnects the client.

@@ -90,20 +90,34 @@ func load() error {
 	return loadErr
 }
 
+// callArgs is scratch for SyscallN so hot calls do not allocate a variadic
+// slice. Display goroutine only; all libwayland calls run there.
+var callArgs [6]uintptr
+
 // Integer and pointer-only entry points avoid RegisterLibFunc's reflective call path.
-func wlDisplayFlushClients(display uintptr) { purego.SyscallN(symDisplayFlushClients, display) }
+func wlDisplayFlushClients(display uintptr) {
+	callArgs[0] = display
+	purego.SyscallN(symDisplayFlushClients, callArgs[:1]...)
+}
 func wlEventLoopDispatch(loop uintptr, timeout int32) int32 {
-	r, _, _ := purego.SyscallN(symEventLoopDispatch, loop, uintptr(timeout))
+	callArgs[0], callArgs[1] = loop, uintptr(timeout)
+	r, _, _ := purego.SyscallN(symEventLoopDispatch, callArgs[:2]...)
 	return int32(r)
 }
 func wlResourceCreate(client, iface uintptr, version int32, id uint32) uintptr {
-	r, _, _ := purego.SyscallN(symResourceCreate, client, iface, uintptr(version), uintptr(id))
+	callArgs[0], callArgs[1], callArgs[2], callArgs[3] = client, iface, uintptr(version), uintptr(id)
+	r, _, _ := purego.SyscallN(symResourceCreate, callArgs[:4]...)
 	return r
 }
 func wlResourceSetDispatcher(resource, dispatcher, impl, data, destroy uintptr) {
-	purego.SyscallN(symResourceSetDispatcher, resource, dispatcher, impl, data, destroy)
+	callArgs[0], callArgs[1], callArgs[2], callArgs[3], callArgs[4] = resource, dispatcher, impl, data, destroy
+	purego.SyscallN(symResourceSetDispatcher, callArgs[:5]...)
 }
 func wlResourcePostEventArr(resource uintptr, opcode uint32, args unsafe.Pointer) {
-	purego.SyscallN(symResourcePostEventArr, resource, uintptr(opcode), uintptr(args))
+	callArgs[0], callArgs[1], callArgs[2] = resource, uintptr(opcode), uintptr(args)
+	purego.SyscallN(symResourcePostEventArr, callArgs[:3]...)
 }
-func wlResourceDestroy(resource uintptr) { purego.SyscallN(symResourceDestroy, resource) }
+func wlResourceDestroy(resource uintptr) {
+	callArgs[0] = resource
+	purego.SyscallN(symResourceDestroy, callArgs[:1]...)
+}
