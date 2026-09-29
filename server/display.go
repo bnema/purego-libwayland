@@ -127,6 +127,22 @@ func (g *Global) Remove() {
 	g.c = 0
 }
 
+// AckGlobalRemove implements wl_fixes.ack_global_remove: libwayland checks
+// that registry announced the removed global name, posting
+// wl_fixes.invalid_ack_remove on fixes otherwise. It reports false when
+// libwayland-server is older than 1.26 and has no support.
+// Display goroutine only.
+func AckGlobalRemove(fixes, registry *Resource, name uint32) bool {
+	if symFixesAckGlobalRemove == 0 {
+		return false
+	}
+	if fixes == nil || fixes.gone || registry == nil || registry.gone {
+		return true
+	}
+	wlFixesHandleAckGlobalRemove(fixes.c, registry.c, name)
+	return true
+}
+
 // Close destroys a display that has not started Run. It is a no-op once Run
 // has started; Run owns destruction in that case. Call before Run starts.
 func (d *Display) Close() {

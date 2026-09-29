@@ -38,6 +38,28 @@ func TestNoHandlerClosesFDs(t *testing.T) {
 	}
 }
 
+// Objects libwayland created itself (wl_registry) come back as bare handles.
+func TestArgResourceUntracked(t *testing.T) {
+	if Arg(0).Resource() != nil {
+		t.Fatal("null object is not nil")
+	}
+	r := Arg(0x1234).Resource()
+	if r == nil || r.c != 0x1234 || r.handler != nil {
+		t.Fatalf("untracked object %+v", r)
+	}
+}
+
+func TestAckGlobalRemoveNilResources(t *testing.T) {
+	if err := load(); err != nil {
+		t.Skip(err)
+	}
+	// A dead or missing resource is ignored, whatever the library version.
+	supported := AckGlobalRemove(nil, nil, 1)
+	if supported != (symFixesAckGlobalRemove != 0) {
+		t.Fatalf("supported %v with symbol %#x", supported, symFixesAckGlobalRemove)
+	}
+}
+
 func TestDoStopped(t *testing.T) {
 	d, err := NewDisplay()
 	if err != nil {

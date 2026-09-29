@@ -32,6 +32,8 @@ var (
 	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate                         uintptr
 	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy, symResourceGetID uintptr
 	symErrnoLocation                                                                        uintptr
+	// wl_fixes support (libwayland 1.26+); zero on older libraries.
+	symFixesAckGlobalRemove uintptr
 
 	// Shared C callbacks. purego callbacks are never freed, so there is one
 	// of each for the whole process.
@@ -84,6 +86,7 @@ func load() error {
 				return
 			}
 		}
+		symFixesAckGlobalRemove, _ = purego.Dlsym(lib, "wl_fixes_handle_ack_global_remove")
 		symErrnoLocation, err = purego.Dlsym(lib, "__errno_location")
 		if err != nil {
 			libc, openErr := purego.Dlopen("libc.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)
@@ -147,4 +150,7 @@ func wlResourcePostEventArr(resource uintptr, opcode uint32, args unsafe.Pointer
 }
 func wlResourceDestroy(resource uintptr) {
 	purego.Syscall6(symResourceDestroy, resource, 0, 0, 0, 0, 0)
+}
+func wlFixesHandleAckGlobalRemove(fixes, registry uintptr, name uint32) {
+	purego.Syscall6(symFixesAckGlobalRemove, fixes, registry, uintptr(name), 0, 0, 0)
 }

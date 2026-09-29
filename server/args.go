@@ -71,7 +71,16 @@ func (a Arg) Uint() uint32        { return uint32(a) }
 func (a Arg) Int() int32          { return int32(uint32(a)) }
 func (a Arg) Fixed() Fixed        { return Fixed(int32(uint32(a))) }
 func (a Arg) NewID() uint32       { return uint32(a) }
-func (a Arg) Resource() *Resource { return live.resources[uintptr(a)] }
+
+// Resource returns the object argument, nil for a null object. An object
+// libwayland created itself (wl_registry, wl_callback of wl_display) comes
+// back as a bare handle: Destroy works, it has no handler, version or client.
+func (a Arg) Resource() *Resource {
+	if r := live.resources[uintptr(a)]; r != nil || a == 0 {
+		return r
+	}
+	return &Resource{c: uintptr(a)}
+}
 
 // Fd returns a received file descriptor. The handler owns it and must close it.
 func (a Arg) Fd() int { return int(int32(uint32(a))) }
