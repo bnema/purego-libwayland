@@ -44,7 +44,7 @@ func TestArgResourceUntracked(t *testing.T) {
 		t.Fatal("null object is not nil")
 	}
 	r := Arg(0x1234).Resource()
-	if r == nil || r.c != 0x1234 || r.handler != nil {
+	if r == nil || r.c != 0x1234 || r.handler != nil || !r.bare || !r.Alive() {
 		t.Fatalf("untracked object %+v", r)
 	}
 }

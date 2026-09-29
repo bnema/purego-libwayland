@@ -32,6 +32,7 @@ type Resource struct {
 	handler   Handler
 	OnDestroy func()
 	gone      bool
+	bare      bool // created by libwayland, no destroy callback
 
 	// Data holds the owner's state, typically the generated wrapper.
 	Data any
@@ -286,6 +287,8 @@ func (r *Resource) Iface() *Interface { return r.iface }
 func (r *Resource) Destroy() {
 	if !r.gone {
 		wlResourceDestroy(r.c)
+		// A bare handle gets no destroy callback to mark it gone.
+		r.gone = r.gone || r.bare
 	}
 }
 
