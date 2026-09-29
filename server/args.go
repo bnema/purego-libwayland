@@ -67,10 +67,10 @@ func Array(p *runtime.Pinner, b []byte) Arg {
 
 // Request argument accessors. Values are only valid during dispatch; the
 // String and Array accessors copy.
-func (a Arg) Uint() uint32        { return uint32(a) }
-func (a Arg) Int() int32          { return int32(uint32(a)) }
-func (a Arg) Fixed() Fixed        { return Fixed(int32(uint32(a))) }
-func (a Arg) NewID() uint32       { return uint32(a) }
+func (a Arg) Uint() uint32  { return uint32(a) }
+func (a Arg) Int() int32    { return int32(uint32(a)) }
+func (a Arg) Fixed() Fixed  { return Fixed(int32(uint32(a))) }
+func (a Arg) NewID() uint32 { return uint32(a) }
 
 // Resource returns the object argument, nil for a null object. An object
 // libwayland created itself (wl_registry, wl_callback of wl_display) comes
