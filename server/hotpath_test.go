@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"testing"
 	"unsafe"
 
@@ -132,5 +133,37 @@ func BenchmarkPostEvent(b *testing.B) {
 		b.StopTimer()
 	}) {
 		b.Fatal("display stopped")
+	}
+}
+
+func TestClientCredentials(t *testing.T) {
+	iface := &Interface{Name: "cred_test", Version: 1, Requests: []Message{{Name: "request", Signature: "uuu"}}, Events: []Message{{Name: "event", Signature: "uuu"}}}
+	d, r := hotDisplay(t, iface, hotHandler)
+	var (
+		got, zero Credentials
+		err, zerr error
+		allocs    float64
+		pid       int
+	)
+	c := r.Client()
+	if !d.Do(func() {
+		got, err = c.Credentials()
+		zero, zerr = Client{}.Credentials()
+		pid = c.PID()
+		allocs = testing.AllocsPerRun(100, func() { _, _ = c.Credentials() })
+	}) {
+		t.Fatal("display stopped")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PID != os.Getpid() || got.UID != uint32(os.Geteuid()) || got.GID != uint32(os.Getegid()) || pid != got.PID {
+		t.Fatalf("credentials %+v pid %d, want pid=%d uid=%d gid=%d", got, pid, os.Getpid(), os.Geteuid(), os.Getegid())
+	}
+	if zerr == nil || zero != (Credentials{}) || (Client{}).PID() != 0 {
+		t.Fatalf("invalid client: %+v, %v", zero, zerr)
+	}
+	if allocs != 0 {
+		t.Fatalf("Credentials allocs = %g, want 0", allocs)
 	}
 }

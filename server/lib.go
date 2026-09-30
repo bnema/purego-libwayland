@@ -22,7 +22,6 @@ var (
 	wlGlobalCreate          func(display, iface uintptr, version int32, data uintptr, bind uintptr) uintptr
 	wlGlobalRemove          func(global uintptr)
 	wlResourcePostError     func(resource uintptr, code uint32, msg uintptr)
-	wlClientGetCredentials  func(client uintptr, pid, uid, gid unsafe.Pointer)
 )
 
 var (
@@ -31,6 +30,7 @@ var (
 
 	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate                         uintptr
 	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy, symResourceGetID uintptr
+	symClientGetCredentials                                                                 uintptr
 	symErrnoLocation                                                                        uintptr
 	// wl_fixes support (libwayland 1.26+); zero on older libraries.
 	symFixesAckGlobalRemove uintptr
@@ -67,7 +67,6 @@ func load() error {
 		reg(&wlGlobalCreate, "wl_global_create")
 		reg(&wlGlobalRemove, "wl_global_remove")
 		reg(&wlResourcePostError, "wl_resource_post_error")
-		reg(&wlClientGetCredentials, "wl_client_get_credentials")
 		for _, entry := range []struct {
 			name string
 			sym  *uintptr
@@ -76,6 +75,7 @@ func load() error {
 			{"wl_event_loop_dispatch", &symEventLoopDispatch},
 			{"wl_resource_create", &symResourceCreate},
 			{"wl_resource_get_id", &symResourceGetID},
+			{"wl_client_get_credentials", &symClientGetCredentials},
 			{"wl_resource_set_dispatcher", &symResourceSetDispatcher},
 			{"wl_resource_post_event_array", &symResourcePostEventArr},
 			{"wl_resource_destroy", &symResourceDestroy},
