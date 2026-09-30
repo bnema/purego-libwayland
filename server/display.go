@@ -20,7 +20,8 @@ type Handler func(r *Resource, opcode uint32, args []Arg)
 // BindFunc runs when a client binds a global.
 type BindFunc func(c Client, version, id uint32)
 
-// Client is a connected wl_client.
+// Client is a connected wl_client. It is a comparable handle to the C object,
+// usable as a map key until the client is destroyed (see Client.OnDestroy).
 type Client struct{ c uintptr }
 
 // Resource is a server-side wl_resource.
@@ -45,7 +46,9 @@ var live = struct {
 	resources map[uintptr]*Resource
 	binds     map[uintptr]BindFunc
 	nextBind  uintptr
-}{resources: map[uintptr]*Resource{}, binds: map[uintptr]BindFunc{}}
+	// clientGone maps wl_listener addresses to OnDestroy functions.
+	clientGone map[uintptr]func()
+}{resources: map[uintptr]*Resource{}, binds: map[uintptr]BindFunc{}, clientGone: map[uintptr]func(){}}
 
 // Display owns a wl_display. All methods except Do must run on the goroutine
 // that calls Run, or before Run starts.

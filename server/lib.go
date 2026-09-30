@@ -30,7 +30,8 @@ var (
 
 	symDisplayFlushClients, symEventLoopDispatch, symResourceCreate                         uintptr
 	symResourceSetDispatcher, symResourcePostEventArr, symResourceDestroy, symResourceGetID uintptr
-	symClientGetCredentials                                                                 uintptr
+	symClientGetCredentials, symClientGetFD, symClientCreate                                uintptr
+	symClientAddDestroyListener, symListRemove                                              uintptr
 	symErrnoLocation                                                                        uintptr
 	// wl_fixes support (libwayland 1.26+); zero on older libraries.
 	symFixesAckGlobalRemove uintptr
@@ -39,6 +40,7 @@ var (
 	// of each for the whole process.
 	cbDispatcher uintptr
 	cbDestroy    uintptr
+	cbClientGone uintptr
 	cbBind       uintptr
 	cbWake       uintptr
 )
@@ -76,6 +78,10 @@ func load() error {
 			{"wl_resource_create", &symResourceCreate},
 			{"wl_resource_get_id", &symResourceGetID},
 			{"wl_client_get_credentials", &symClientGetCredentials},
+			{"wl_client_get_fd", &symClientGetFD},
+			{"wl_client_create", &symClientCreate},
+			{"wl_client_add_destroy_listener", &symClientAddDestroyListener},
+			{"wl_list_remove", &symListRemove},
 			{"wl_resource_set_dispatcher", &symResourceSetDispatcher},
 			{"wl_resource_post_event_array", &symResourcePostEventArr},
 			{"wl_resource_destroy", &symResourceDestroy},
@@ -108,6 +114,10 @@ func load() error {
 		})
 		cbDestroy = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
 			destroyed(a.Int(0))
+			return 0
+		})
+		cbClientGone = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			clientGone(a.Int(0))
 			return 0
 		})
 		cbBind = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
