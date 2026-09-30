@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/bnema/purego"
 	"golang.org/x/sys/unix"
 )
 
@@ -234,16 +235,37 @@ func (d *Display) Stopped() <-chan struct{} { return d.stopped }
 // LiveResources reports resources not yet destroyed. Display goroutine only.
 func LiveResources() int { return len(live.resources) }
 
-// PID is the process ID of the client, read from the socket credentials
-// (SO_PEERCRED) when it connected. Zero for an invalid client.
-// Display goroutine only.
-func (c Client) PID() int {
+// Credentials are the peer credentials of a client, read from the socket
+// (SO_PEERCRED) when it connected.
+type Credentials struct {
+	PID int
+	UID uint32
+	GID uint32
+}
+
+var credScratch [3]int32
+
+var errInvalidClient = errors.New("purego-libwayland: invalid client")
+
+// Credentials returns the peer credentials of the client. It returns an error
+// for an invalid (zero) Client. It does not allocate. Display goroutine only.
+func (c Client) Credentials() (Credentials, error) {
 	if c.c == 0 {
+		return Credentials{}, errInvalidClient
+	}
+	// Package-level scratch (display goroutine only) avoids heap-escaping locals.
+	purego.Syscall6(symClientGetCredentials, c.c, uintptr(unsafe.Pointer(&credScratch[0])), uintptr(unsafe.Pointer(&credScratch[1])), uintptr(unsafe.Pointer(&credScratch[2])), 0, 0)
+	return Credentials{PID: int(credScratch[0]), UID: uint32(credScratch[1]), GID: uint32(credScratch[2])}, nil
+}
+
+// PID is the process ID of the client, from Credentials. Zero for an invalid
+// client. Display goroutine only.
+func (c Client) PID() int {
+	cr, err := c.Credentials()
+	if err != nil {
 		return 0
 	}
-	var pid, uid, gid int32
-	wlClientGetCredentials(c.c, unsafe.Pointer(&pid), unsafe.Pointer(&uid), unsafe.Pointer(&gid))
-	return int(pid)
+	return cr.PID
 }
 
 func (c Client) CreateResource(iface *Interface, version int32, id uint32, h Handler) (*Resource, error) {
