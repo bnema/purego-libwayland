@@ -236,7 +236,9 @@ func (d *Display) Stopped() <-chan struct{} { return d.stopped }
 func LiveResources() int { return len(live.resources) }
 
 // Credentials are the peer credentials of a client, read from the socket
-// (SO_PEERCRED) when it connected.
+// (SO_PEERCRED) when it connected. UID/GID are effective IDs in the server's
+// namespaces; an unmappable ID is the namespace overflow ID. PID may be zero
+// even for a valid client when its PID namespace is not visible to the server.
 type Credentials struct {
 	PID int
 	UID uint32
@@ -258,8 +260,9 @@ func (c Client) Credentials() (Credentials, error) {
 	return Credentials{PID: int(credScratch[0]), UID: uint32(credScratch[1]), GID: uint32(credScratch[2])}, nil
 }
 
-// PID is the process ID of the client, from Credentials. Zero for an invalid
-// client. Display goroutine only.
+// PID is the process ID of the client, from Credentials. It is zero for an
+// invalid client or a peer outside the server's visible PID namespaces.
+// Display goroutine only.
 func (c Client) PID() int {
 	cr, err := c.Credentials()
 	if err != nil {
