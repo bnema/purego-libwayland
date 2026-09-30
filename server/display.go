@@ -52,6 +52,9 @@ var live = struct {
 
 // Display owns a wl_display. All methods except Do must run on the goroutine
 // that calls Run, or before Run starts.
+//
+// Resource, bind and client-listener state is shared by the whole process, so
+// only one Display may be running at a time per process.
 // Do wakes the loop through an eventfd so calls run at once instead of after
 // the dispatch timeout.
 type Display struct {

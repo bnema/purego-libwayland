@@ -32,7 +32,13 @@ func (c Client) FD() (int, error) {
 // failure libwayland does not take it (it is left open) and the caller keeps
 // ownership and must close it. Sockets should be close-on-exec (accept with
 // SOCK_CLOEXEC); libwayland does not set the flag. fd must be a connected
-// unix socket: libwayland reads its peer credentials with SO_PEERCRED.
+// unix socket: libwayland reads its peer credentials with SO_PEERCRED. A
+// socket whose peer has already closed is still adopted; the client is then
+// destroyed on the next dispatch.
+//
+// On failure the error wraps the errno libwayland left (for example ENOTSOCK
+// or ENOMEM), read right after the call on the same thread; it is reliable
+// when called on the locked display goroutine.
 //
 // The returned Client is valid until destroyed; register OnDestroy to learn
 // when. Display goroutine only, or before Run starts.
@@ -45,7 +51,7 @@ func (d *Display) CreateClient(fd int) (Client, error) {
 	}
 	r, _, _ := purego.Syscall6(symClientCreate, d.c, uintptr(fd), 0, 0, 0, 0)
 	if r == 0 {
-		return Client{}, fmt.Errorf("purego-libwayland: wl_client_create(%d) failed; fd not adopted", fd)
+		return Client{}, fmt.Errorf("purego-libwayland: wl_client_create(%d) failed, fd not adopted: %w", fd, lastErrno())
 	}
 	return Client{r}, nil
 }
@@ -62,12 +68,17 @@ func (d *Display) CreateClient(fd int) (Client, error) {
 // delete it from a map[Client]T, because the handle value may be reused by a
 // later client.
 //
+// Registering another listener on the same client from inside fn is not
+// supported: whether it would run depends on how libwayland's final emit walks
+// the listener list (it differs between versions). Registering on a different,
+// live client from inside fn is fine.
+//
 // A Client is a comparable value (a handle to the C object) and is safe as a
 // map key from its creation or bind until fn runs.
 //
 // OnDestroy does nothing for a zero Client or nil fn. Registering on an
-// already destroyed client is invalid. Display goroutine only, or before Run
-// starts.
+// already destroyed client is invalid. It panics if the memory for the
+// listener cannot be mapped. Display goroutine only, or before Run starts.
 func (c Client) OnDestroy(fn func()) {
 	if c.c == 0 || fn == nil {
 		return
@@ -121,8 +132,10 @@ func (s *listenerSlots) put(l uintptr) { s.free = append(s.free, l) }
 func clientGone(l uintptr) {
 	fn := live.clientGone[l]
 	delete(live.clientGone, l)
-	// libwayland may leave the node linked while notifying; unlink it
-	// (harmless if it already is) before the slot can be reused.
+	// libwayland's emit loop first unlinks each node and, on current versions,
+	// resets it with wl_list_init, so this is a no-op on a self-linked node;
+	// on older versions the node may still be linked and must be unlinked
+	// before the slot can be reused.
 	purego.Syscall6(symListRemove, l, 0, 0, 0, 0, 0)
 	listeners.put(l)
 	if fn != nil {

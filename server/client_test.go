@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,19 +42,47 @@ func clientDisplay(t *testing.T) (*Display, func()) {
 	return d, stop
 }
 
-func socketPair(t *testing.T) [2]int {
+// sockPair is a connected socketpair. srv is meant to be adopted by the
+// display; peer is the test's end, closed at most once.
+type sockPair struct {
+	srv, peer int
+	once      sync.Once
+}
+
+func socketPair(t *testing.T) *sockPair {
 	t.Helper()
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	raw, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = unix.Close(fds[1]) })
-	return [2]int{fds[0], fds[1]}
+	p := &sockPair{srv: raw[0], peer: raw[1]}
+	t.Cleanup(p.closePeer)
+	return p
 }
 
-func fdOpen(fd int) bool {
-	_, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
-	return err == nil
+// closePeer closes the peer end; it is idempotent, so a test may call it and
+// the cleanup still will not close a reused descriptor number.
+func (p *sockPair) closePeer() { p.once.Do(func() { _ = unix.Close(p.peer) }) }
+
+// fileID identifies the open file behind fd, immune to fd number reuse.
+type fileID struct{ dev, ino uint64 }
+
+func identify(t *testing.T, fd int) fileID {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		t.Fatal(err)
+	}
+	return fileID{uint64(st.Dev), st.Ino}
+}
+
+// stillOpen reports whether fd still refers to the file id.
+func stillOpen(fd int, id fileID) bool {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		return false
+	}
+	return fileID{uint64(st.Dev), st.Ino} == id
 }
 
 func adopt(t *testing.T, d *Display, fd int) Client {
@@ -71,7 +101,7 @@ func adopt(t *testing.T, d *Display, fd int) Client {
 func TestClientFD(t *testing.T) {
 	d, _ := clientDisplay(t)
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
+	c := adopt(t, d, fds.srv)
 	var (
 		got, zero int
 		err, zerr error
@@ -84,8 +114,8 @@ func TestClientFD(t *testing.T) {
 	}) {
 		t.Fatal("display stopped")
 	}
-	if err != nil || got != fds[0] {
-		t.Fatalf("FD = %d, %v; want %d", got, err, fds[0])
+	if err != nil || got != fds.srv {
+		t.Fatalf("FD = %d, %v; want %d", got, err, fds.srv)
 	}
 	if zerr == nil || zero != -1 {
 		t.Fatalf("invalid client FD = %d, %v", zero, zerr)
@@ -103,6 +133,7 @@ func TestCreateClientFailureKeepsFD(t *testing.T) {
 	}
 	defer unix.Close(p[0])
 	defer unix.Close(p[1])
+	pipeID := identify(t, p[0])
 	var err, errNeg error
 	var c, cn Client
 	if !d.Do(func() {
@@ -111,10 +142,13 @@ func TestCreateClientFailureKeepsFD(t *testing.T) {
 	}) {
 		t.Fatal("display stopped")
 	}
+	if !errors.Is(err, unix.ENOTSOCK) {
+		t.Fatalf("error %v does not wrap ENOTSOCK", err)
+	}
 	if err == nil || c != (Client{}) || errNeg == nil || cn != (Client{}) {
 		t.Fatalf("got %v %v, %v %v; want errors", c, err, cn, errNeg)
 	}
-	if !fdOpen(p[0]) {
+	if !stillOpen(p[0], pipeID) {
 		t.Fatal("failed CreateClient closed the fd")
 	}
 }
@@ -122,13 +156,11 @@ func TestCreateClientFailureKeepsFD(t *testing.T) {
 func TestCreateClientOwnsFD(t *testing.T) {
 	d, _ := clientDisplay(t)
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
+	c := adopt(t, d, fds.srv)
 	gone := make(chan struct{})
 	d.Do(func() { c.OnDestroy(func() { close(gone) }) })
-	if !fdOpen(fds[0]) {
-		t.Fatal("adopted fd closed early")
-	}
-	_ = unix.Close(fds[1])
+	id := identify(t, fds.srv)
+	fds.closePeer()
 	select {
 	case <-gone:
 	case <-time.After(3 * time.Second):
@@ -137,7 +169,7 @@ func TestCreateClientOwnsFD(t *testing.T) {
 	// The listener runs before libwayland closes the fd; Do returns only once
 	// the destruction that ran it has finished.
 	d.Do(func() {})
-	if fdOpen(fds[0]) {
+	if stillOpen(fds.srv, id) {
 		t.Fatal("libwayland did not close the adopted fd")
 	}
 }
@@ -185,13 +217,13 @@ func TestCreateClientBindsRegistry(t *testing.T) {
 	defer func() { cancel(); <-done }()
 
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
-	if err := unix.SetsockoptTimeval(fds[1], unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 3}); err != nil {
+	c := adopt(t, d, fds.srv)
+	if err := unix.SetsockoptTimeval(fds.peer, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 3}); err != nil {
 		t.Fatal(err)
 	}
 	// wl_display.get_registry(new_id 2), then wl_display.sync(new_id 3).
 	req := append(wireMsg(1, 1, u32(2)), wireMsg(1, 0, u32(3))...)
-	if _, err := unix.Write(fds[1], req); err != nil {
+	if _, err := unix.Write(fds.peer, req); err != nil {
 		t.Fatal(err)
 	}
 	// Read until the sync callback's done event (object 3), collecting globals.
@@ -199,7 +231,7 @@ func TestCreateClientBindsRegistry(t *testing.T) {
 	var name uint32
 	buf := make([]byte, 4096)
 	for sawDone := false; !sawDone; {
-		n, err := unix.Read(fds[1], buf)
+		n, err := unix.Read(fds.peer, buf)
 		if err != nil || n == 0 {
 			t.Fatalf("read: %d, %v", n, err)
 		}
@@ -227,7 +259,7 @@ func TestCreateClientBindsRegistry(t *testing.T) {
 		t.Fatal("global not advertised to the adopted client")
 	}
 	// wl_registry.bind(name, interface, version, new_id 4)
-	if _, err := unix.Write(fds[1], wireMsg(2, 0, u32(name), wireString(iface.Name), u32(1), u32(4))); err != nil {
+	if _, err := unix.Write(fds.peer, wireMsg(2, 0, u32(name), wireString(iface.Name), u32(1), u32(4))); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -247,7 +279,7 @@ func TestOnDestroyOnDisconnect(t *testing.T) {
 	}
 	d, _ := clientDisplay(t)
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
+	c := adopt(t, d, fds.srv)
 	var (
 		order              []int
 		resAlive, fdOK     bool
@@ -265,7 +297,7 @@ func TestOnDestroyOnDisconnect(t *testing.T) {
 				if i == 3 {
 					var fd int
 					fd, fdError = c.FD()
-					fdOK = fd == fds[0]
+					fdOK = fd == fds.srv
 					resAlive = res.Alive()
 					delete(other, c)
 					close(fired)
@@ -286,7 +318,7 @@ func TestOnDestroyOnDisconnect(t *testing.T) {
 		t.Fatal("fired before disconnect")
 	case <-time.After(50 * time.Millisecond):
 	}
-	_ = unix.Close(fds[1])
+	fds.closePeer()
 	select {
 	case <-fired:
 	case <-time.After(3 * time.Second):
@@ -313,7 +345,7 @@ func TestOnDestroyOnDisplayClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	fds := socketPair(t)
-	c, err := d.CreateClient(fds[0])
+	c, err := d.CreateClient(fds.srv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +362,7 @@ func TestOnDestroyOnDisplayClose(t *testing.T) {
 func TestOnDestroyOnRunStop(t *testing.T) {
 	d, stop := clientDisplay(t)
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
+	c := adopt(t, d, fds.srv)
 	n := 0
 	d.Do(func() { c.OnDestroy(func() { n++ }) })
 	stop()
@@ -343,10 +375,10 @@ func TestOnDestroyOnRunStop(t *testing.T) {
 func TestOnDestroyOnce(t *testing.T) {
 	d, stop := clientDisplay(t)
 	fds := socketPair(t)
-	c := adopt(t, d, fds[0])
+	c := adopt(t, d, fds.srv)
 	fired := make(chan struct{}, 4)
 	d.Do(func() { c.OnDestroy(func() { fired <- struct{}{} }) })
-	_ = unix.Close(fds[1])
+	fds.closePeer()
 	select {
 	case <-fired:
 	case <-time.After(3 * time.Second):
@@ -355,5 +387,140 @@ func TestOnDestroyOnce(t *testing.T) {
 	stop()
 	if len(fired) != 0 {
 		t.Fatal("OnDestroy fired twice")
+	}
+}
+
+// A peer that already hung up does not stop adoption; the client is then
+// destroyed and its listener runs.
+func TestCreateClientPeerAlreadyClosed(t *testing.T) {
+	d, _ := clientDisplay(t)
+	fds := socketPair(t)
+	fds.closePeer()
+	id := identify(t, fds.srv) // before adoption: the client may die at once
+	gone := make(chan struct{})
+	var err error
+	// Adopt and register in one call, before the loop can destroy the client.
+	if !d.Do(func() {
+		var c Client
+		if c, err = d.CreateClient(fds.srv); err == nil {
+			c.OnDestroy(func() { close(gone) })
+		}
+	}) {
+		t.Fatal("display stopped")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client with a closed peer was not destroyed")
+	}
+	d.Do(func() {})
+	if stillOpen(fds.srv, id) {
+		t.Fatal("adopted fd not closed")
+	}
+}
+
+// A listener may register on another live client from inside its callback,
+// even though it is handed the slot that is firing.
+func TestOnDestroyRegistersOnOtherClient(t *testing.T) {
+	d, _ := clientDisplay(t)
+	a, b := socketPair(t), socketPair(t)
+	ca, cb := adopt(t, d, a.srv), adopt(t, d, b.srv)
+	aGone := make(chan struct{})
+	bGone := make(chan struct{}, 2)
+	var slotA, slotB uintptr
+	d.Do(func() {
+		for l := range live.clientGone {
+			t.Errorf("unexpected live listener %#x", l)
+		}
+		ca.OnDestroy(func() {
+			cb.OnDestroy(func() { bGone <- struct{}{} })
+			for l := range live.clientGone {
+				slotB = l
+			}
+			close(aGone)
+		})
+		for l := range live.clientGone {
+			slotA = l
+		}
+	})
+	a.closePeer()
+	select {
+	case <-aGone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first client's listener did not fire")
+	}
+	if slotA == 0 || slotA != slotB {
+		t.Fatalf("freed slot not reused: %#x then %#x", slotA, slotB)
+	}
+	select {
+	case <-bGone:
+		t.Fatal("second client's listener fired early")
+	case <-time.After(50 * time.Millisecond):
+	}
+	b.closePeer()
+	select {
+	case <-bGone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("listener registered from a callback did not fire")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(bGone) != 0 {
+		t.Fatal("listener fired twice")
+	}
+}
+
+// More listeners than one mapped chunk holds: all fire once, every slot comes
+// back, and a later registration reuses a recycled slot.
+func TestOnDestroyManyListeners(t *testing.T) {
+	d, _ := clientDisplay(t)
+	fds := socketPair(t)
+	fds2 := socketPair(t)
+	c := adopt(t, d, fds.srv)
+	const n = 3*listenerChunkSize/listenerSlot + 5
+	var fired, chunksBefore int
+	done := make(chan struct{})
+	var before, after int
+	d.Do(func() {
+		for i := 0; i < n; i++ {
+			c.OnDestroy(func() {
+				fired++
+				if fired == n {
+					close(done)
+				}
+			})
+		}
+		before = len(listeners.free)
+		chunksBefore = len(listeners.chunks)
+	})
+	if chunksBefore < 3 {
+		t.Fatalf("test did not cross a chunk boundary: %d chunks", chunksBefore)
+	}
+	fds.closePeer()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("not every listener fired")
+	}
+	var reused bool
+	var firedNow int
+	d.Do(func() {
+		firedNow = fired
+		after = len(listeners.free)
+		c2, err := d.CreateClient(fds2.srv)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		c2.OnDestroy(func() {})
+		reused = len(listeners.chunks) == chunksBefore && len(listeners.free) == after-1
+	})
+	if after != before+n {
+		t.Fatalf("free slots %d -> %d, want +%d", before, after, n)
+	}
+	if firedNow != n || !reused {
+		t.Fatalf("fired %d, slot reused %v", firedNow, reused)
 	}
 }
