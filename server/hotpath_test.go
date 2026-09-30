@@ -157,8 +157,8 @@ func TestClientCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PID != os.Getpid() || got.UID != uint32(os.Getuid()) || got.GID != uint32(os.Getgid()) || pid != got.PID {
-		t.Fatalf("credentials %+v pid %d, want pid=%d uid=%d gid=%d", got, pid, os.Getpid(), os.Getuid(), os.Getgid())
+	if got.PID != os.Getpid() || got.UID != uint32(os.Geteuid()) || got.GID != uint32(os.Getegid()) || pid != got.PID {
+		t.Fatalf("credentials %+v pid %d, want pid=%d uid=%d gid=%d", got, pid, os.Getpid(), os.Geteuid(), os.Getegid())
 	}
 	if zerr == nil || zero != (Credentials{}) || (Client{}).PID() != 0 {
 		t.Fatalf("invalid client: %+v, %v", zero, zerr)
