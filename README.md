@@ -1,6 +1,6 @@
 # purego-libwayland
 
-Go bindings for libwayland without cgo, loaded at runtime through github.com/bnema/purego.
+Go bindings for libwayland-server without cgo, loaded at runtime through github.com/bnema/purego.
 
 ## Status
 

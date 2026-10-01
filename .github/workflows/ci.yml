@@ -12,6 +12,34 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27'
-      - run: sudo apt-get install -y libwayland-server0
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-server0
       - run: make check
       - run: make race
+
+  bindings:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: purego-libwayland
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: bnema/go-wayland-bindings
+          ref: main
+          path: bindings
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go.mod
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-server0
+      - name: Build and test go-wayland-bindings against this checkout
+        working-directory: bindings
+        run: |
+          go mod edit -replace github.com/bnema/purego-libwayland=../purego-libwayland
+          go mod tidy
+          CGO_ENABLED=0 go build ./...
+          go vet ./server/...
+          CGO_ENABLED=0 go test ./server/... ./internal/e2e/...
