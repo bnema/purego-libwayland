@@ -1,10 +1,10 @@
 # purego-libwayland
 
-Go bindings for libwayland without cgo, loaded at runtime through github.com/bnema/purego.
+Go bindings for libwayland-server without cgo, loaded at runtime through github.com/bnema/purego.
 
 ## Status
 
-Early v0.x. Server bindings and generated Wayland protocol packages are available.
+Early v0.x. A server-side libwayland runtime (`server/` package).
 
 ## Requirements
 
@@ -16,10 +16,10 @@ Linux, Go 1.27, and `libwayland-server.so.0` at runtime.
 CGO_ENABLED=0 go build ./...
 ```
 
-## Protocol generation
+## Protocol bindings
 
-Vendored protocol XML lives in `protocols/`. Run `make generate` to regenerate the Go packages in `protocol/`. Each XML file keeps the copyright and license of its upstream project (wayland, wayland-protocols, wlr-protocols, KDE).
+Generated protocol bindings live in [github.com/bnema/go-wayland-bindings](https://github.com/bnema/go-wayland-bindings), one package per protocol under `server/<pkg>`, for example `server/xdgshell` and `server/wlrlayershell`. They build on this runtime's `server` package.
 
 ## License
 
-MIT, see `LICENSE`. Vendored protocol XML files keep their own licenses.
+MIT, see `LICENSE`.
