@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -88,10 +89,6 @@ type Display struct {
 
 	// sources are the AddFD sources not yet removed (display goroutine only).
 	sources map[*Source]struct{}
-
-	// dispatchMS bounds one event loop wait; it only bounds how late ctx
-	// cancellation is seen. Tests raise it so a lost wake hangs.
-	dispatchMS int32
 }
 
 // maxDrainRounds bounds how many times one loop iteration re-drains calls and
@@ -112,7 +109,7 @@ func NewDisplay() (*Display, error) {
 		wlDisplayDestroy(c)
 		return nil, fmt.Errorf("purego-libwayland: eventfd: %w", err)
 	}
-	d := &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func(), 64), wake: wake, stopped: make(chan struct{}), sources: map[*Source]struct{}{}, dispatchMS: 100}
+	d := &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func(), 64), wake: wake, stopped: make(chan struct{}), sources: map[*Source]struct{}{}}
 	// The callback only drains the counter; Run then executes queued calls.
 	if d.wakeSrc = wlEventLoopAddFD(d.loop, int32(wake), 1 /* WL_EVENT_READABLE */, cbWake, 0); d.wakeSrc == 0 {
 		unix.Close(wake)
@@ -219,21 +216,48 @@ func (d *Display) Run(ctx context.Context) error {
 	defer runtime.UnlockOSThread()
 	defer close(d.stopped)
 	defer d.destroy()
+	// Wait for the event loop's epoll fd in Go's netpoller instead of blocking
+	// in epoll_wait inside C: the goroutine parks, its P is released, and the
+	// runtime's sysmon can sleep deeply while the server is idle. libwayland
+	// is then dispatched without blocking.
+	loopFile, err := d.openLoopFile()
+	if err != nil {
+		return err
+	}
+	defer loopFile.Close() // runs before destroy: the dup must not outlive the epoll fd
+	rc, err := loopFile.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("purego-libwayland: event loop fd: %w", err)
+	}
+	// Cancellation wakes the loop through the eventfd.
+	stop := context.AfterFunc(ctx, d.wakeGuarded)
+	defer stop()
+	ready := func(fd uintptr) bool {
+		// Level-triggered check: the netpoller is edge-triggered, and a
+		// dispatch can leave events (libwayland takes 32 per epoll_wait).
+		fds := [1]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds[:], 0)
+		return n > 0 || (err != nil && err != unix.EINTR)
+	}
 	consecutiveFailures := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		// Run every queued post and call. Wakes are coalesced, so the eventfd
-		// is not written once per item; it only makes the dispatch below
+		// is not written once per item; it only makes the wait below
 		// return at once when work arrives while the loop is asleep.
 		d.drain()
 		wlDisplayFlushClients(d.c)
-		// The timeout only bounds how late ctx cancellation is seen.
-		if wlEventLoopDispatch(d.loop, d.dispatchMS) < 0 {
+		if err := rc.Read(ready); err != nil {
+			return fmt.Errorf("purego-libwayland: wait for event loop: %w", err)
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if wlEventLoopDispatch(d.loop, 0) < 0 {
 			errno := lastErrno()
 			consecutiveFailures++
-			// epoll_wait is interrupted by Go's preemption signals (EINTR); a persistent failure (EBADF, EINVAL) repeats.
 			if consecutiveFailures < 16 {
 				continue
 			}
@@ -242,6 +266,23 @@ func (d *Display) Run(ctx context.Context) error {
 		consecutiveFailures = 0
 		wlDisplayFlushClients(d.c)
 	}
+}
+
+// openLoopFile wraps a duplicate of the event loop's epoll fd for the netpoller.
+func (d *Display) openLoopFile() (*os.File, error) {
+	fd := int(wlEventLoopGetFD(d.loop))
+	if fd < 0 {
+		return nil, errors.New("purego-libwayland: wl_event_loop_get_fd failed")
+	}
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("purego-libwayland: dup event loop fd: %w", err)
+	}
+	if err := unix.SetNonblock(dup, true); err != nil {
+		unix.Close(dup)
+		return nil, fmt.Errorf("purego-libwayland: nonblock event loop fd: %w", err)
+	}
+	return os.NewFile(uintptr(dup), "wl-event-loop"), nil
 }
 
 // drain runs queued posts and Do calls until none are left, at most
