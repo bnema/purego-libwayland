@@ -88,6 +88,10 @@ type Display struct {
 
 	// sources are the AddFD sources not yet removed (display goroutine only).
 	sources map[*Source]struct{}
+
+	// dispatchMS bounds one event loop wait; it only bounds how late ctx
+	// cancellation is seen. Tests raise it so a lost wake hangs.
+	dispatchMS int32
 }
 
 // maxDrainRounds bounds how many times one loop iteration re-drains calls and
@@ -108,7 +112,7 @@ func NewDisplay() (*Display, error) {
 		wlDisplayDestroy(c)
 		return nil, fmt.Errorf("purego-libwayland: eventfd: %w", err)
 	}
-	d := &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func(), 64), wake: wake, stopped: make(chan struct{}), sources: map[*Source]struct{}{}}
+	d := &Display{c: c, loop: wlDisplayGetEventLoop(c), calls: make(chan func(), 64), wake: wake, stopped: make(chan struct{}), sources: map[*Source]struct{}{}, dispatchMS: 100}
 	// The callback only drains the counter; Run then executes queued calls.
 	if d.wakeSrc = wlEventLoopAddFD(d.loop, int32(wake), 1 /* WL_EVENT_READABLE */, cbWake, 0); d.wakeSrc == 0 {
 		unix.Close(wake)
@@ -226,7 +230,7 @@ func (d *Display) Run(ctx context.Context) error {
 		d.drain()
 		wlDisplayFlushClients(d.c)
 		// The timeout only bounds how late ctx cancellation is seen.
-		if wlEventLoopDispatch(d.loop, 100) < 0 {
+		if wlEventLoopDispatch(d.loop, d.dispatchMS) < 0 {
 			errno := lastErrno()
 			consecutiveFailures++
 			// epoll_wait is interrupted by Go's preemption signals (EINTR); a persistent failure (EBADF, EINVAL) repeats.

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -387,18 +388,32 @@ func TestAddFDErrors(t *testing.T) {
 }
 
 // Posts from many goroutines must wake the loop without any Do to rescue a
-// lost wake: a lost wake would leave the posts waiting for the 100 ms dispatch
-// timeout.
+// lost wake. The dispatch timeout is raised far past waitFor's limit, so a
+// lost wake hangs the round instead of only slowing it.
 func TestPostMultiProducerNoLostWake(t *testing.T) {
-	d := runDisplay(t)
+	d, err := NewDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.dispatchMS = 60_000
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		// Wake the loop so it sees the cancellation before the long timeout.
+		d.Post(func() {})
+		if err := <-runDone; err != nil {
+			t.Error(err)
+		}
+	})
 	const producers, perProducer, rounds = 8, 250, 10
-	for round := range rounds {
+	for range rounds {
 		// Let the loop go idle in epoll_wait.
 		time.Sleep(5 * time.Millisecond)
 		var left atomic.Int32
 		left.Store(producers * perProducer)
 		done := make(chan struct{})
-		start := time.Now()
 		var wg sync.WaitGroup
 		for range producers {
 			wg.Add(1)
@@ -413,10 +428,7 @@ func TestPostMultiProducerNoLostWake(t *testing.T) {
 				}
 			}()
 		}
-		waitFor(t, done, "all posts")
-		if e := time.Since(start); e > 90*time.Millisecond {
-			t.Fatalf("round %d: %d posts took %v; a wake was lost", round, producers*perProducer, e)
-		}
+		waitFor(t, done, "all posts (a lost wake hangs here)")
 		wg.Wait()
 	}
 }
@@ -473,9 +485,15 @@ func TestDoPostRaceWithCancel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Force the reuse: make the old wake fd number refer to efd.
-		if err := unix.Dup3(efd, d.wake, unix.O_CLOEXEC); err != nil {
-			t.Fatal(err)
+		// Force the reuse: make the old wake fd number refer to efd, unless
+		// efd already got that number. Never clobber an fd in use.
+		if efd != d.wake {
+			if _, err := unix.FcntlInt(uintptr(d.wake), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+				t.Fatalf("old wake fd %d is still in use: %v", d.wake, err)
+			}
+			if err := unix.Dup3(efd, d.wake, unix.O_CLOEXEC); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for range 50 {
 			d.Do(func() { t.Error("Do function ran after Stopped") })
@@ -483,11 +501,13 @@ func TestDoPostRaceWithCancel(t *testing.T) {
 		}
 		wg.Wait()
 		var b [8]byte
-		if _, err := unix.Read(efd, b[:]); err != unix.EAGAIN {
+		if _, err := unix.Read(efd, b[:]); !errors.Is(err, unix.EAGAIN) {
 			t.Fatalf("eventfd %d (display wake fd was %d) was written after stop: %v", efd, d.wake, err)
 		}
 		unix.Close(efd)
-		unix.Close(d.wake)
+		if efd != d.wake {
+			unix.Close(d.wake)
+		}
 	}
 }
 
