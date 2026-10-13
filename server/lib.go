@@ -43,6 +43,7 @@ var (
 	cbClientGone uintptr
 	cbBind       uintptr
 	cbWake       uintptr
+	cbFD         uintptr
 )
 
 func load() error {
@@ -126,6 +127,9 @@ func load() error {
 		})
 		cbWake = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
 			return uintptr(uint32(wake(int32(a.Int(0)), uint32(a.Int(1)), a.Int(2))))
+		})
+		cbFD = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+			return uintptr(uint32(fdReadable(int32(a.Int(0)), uint32(a.Int(1)), a.Int(2))))
 		})
 	})
 	return loadErr
