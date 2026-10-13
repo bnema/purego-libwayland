@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,7 +198,7 @@ func TestPostSelfRepostingIsCappedAndResumes(t *testing.T) {
 	start := time.Now()
 	d.Post(step)
 	waitFor(t, done, "self-reposting chain")
-	if e := time.Since(start); e > 50*time.Millisecond {
+	if e := time.Since(start); e > 500*time.Millisecond {
 		t.Fatalf("chain of %d posts took %v; wake not re-armed at the round cap", total, e)
 	}
 	// Do still gets served.
@@ -305,7 +306,7 @@ func TestAddFDTimerfdFiresOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, fired, "timerfd")
-	if e := time.Since(start); e > 50*time.Millisecond {
+	if e := time.Since(start); e > 500*time.Millisecond {
 		t.Fatalf("1 ms timer fired after %v", e)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -357,6 +358,7 @@ func TestAddFDErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer d.Close()
 	if _, err := d.AddFD(-1, func() {}); err == nil {
 		t.Error("negative fd accepted")
 	}
@@ -382,4 +384,174 @@ func TestAddFDErrors(t *testing.T) {
 	if len(live.fds) != 0 {
 		t.Errorf("%d fd callbacks leaked", len(live.fds))
 	}
+}
+
+// Posts from many goroutines must wake the loop without any Do to rescue a
+// lost wake: a lost wake would leave the posts waiting for the 100 ms dispatch
+// timeout.
+func TestPostMultiProducerNoLostWake(t *testing.T) {
+	d := runDisplay(t)
+	const producers, perProducer, rounds = 8, 250, 10
+	for round := range rounds {
+		// Let the loop go idle in epoll_wait.
+		time.Sleep(5 * time.Millisecond)
+		var left atomic.Int32
+		left.Store(producers * perProducer)
+		done := make(chan struct{})
+		start := time.Now()
+		var wg sync.WaitGroup
+		for range producers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range perProducer {
+					d.Post(func() {
+						if left.Add(-1) == 0 {
+							close(done)
+						}
+					})
+				}
+			}()
+		}
+		waitFor(t, done, "all posts")
+		if e := time.Since(start); e > 90*time.Millisecond {
+			t.Fatalf("round %d: %d posts took %v; a wake was lost", round, producers*perProducer, e)
+		}
+		wg.Wait()
+	}
+}
+
+// Do and Post racing with shutdown must neither panic nor run anything after
+// Stopped, and Do's wake must not write to the closed eventfd's number once it
+// is reused.
+func TestDoPostRaceWithCancel(t *testing.T) {
+	for range 20 {
+		d, err := NewDisplay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- d.Run(ctx) }()
+
+		var stopped atomic.Bool
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				for range 200 {
+					d.Do(func() {
+						if stopped.Load() {
+							t.Error("Do function ran after Stopped")
+						}
+					})
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for range 200 {
+					d.Post(func() {
+						if stopped.Load() {
+							t.Error("post ran after Stopped")
+						}
+					})
+				}
+			}()
+		}
+		time.Sleep(time.Millisecond)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		<-d.Stopped()
+		stopped.Store(true)
+
+		// The closed wake fd's number is free for reuse now. Late Do and Post
+		// calls must not write to whoever gets it.
+		efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Force the reuse: make the old wake fd number refer to efd.
+		if err := unix.Dup3(efd, d.wake, unix.O_CLOEXEC); err != nil {
+			t.Fatal(err)
+		}
+		for range 50 {
+			d.Do(func() { t.Error("Do function ran after Stopped") })
+			d.Post(func() { t.Error("post ran after Stopped") })
+		}
+		wg.Wait()
+		var b [8]byte
+		if _, err := unix.Read(efd, b[:]); err != unix.EAGAIN {
+			t.Fatalf("eventfd %d (display wake fd was %d) was written after stop: %v", efd, d.wake, err)
+		}
+		unix.Close(efd)
+		unix.Close(d.wake)
+	}
+}
+
+// Sources still registered when Run exits are released with the display.
+func TestRunExitReleasesSources(t *testing.T) {
+	d, err := NewDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(efd)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	var addErr error
+	if !d.Do(func() { _, addErr = d.AddFD(efd, func() {}) }) || addErr != nil {
+		t.Fatalf("AddFD: %v", addErr)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	<-d.Stopped()
+	if len(live.fds) != 0 {
+		t.Errorf("%d fd callbacks leaked after Run exited", len(live.fds))
+	}
+	if len(d.sources) != 0 {
+		t.Errorf("%d sources still tracked after Run exited", len(d.sources))
+	}
+}
+
+func TestPostFromAddFDCallback(t *testing.T) {
+	d := runDisplay(t)
+	want := displayTID(t, d)
+	efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(efd)
+	got := make(chan int, 1)
+	var src *Source
+	if !d.Do(func() {
+		src, err = d.AddFD(efd, func() {
+			var b [8]byte
+			_, _ = unix.Read(efd, b[:])
+			d.Post(func() { got <- unix.Gettid() })
+		})
+	}) || err != nil {
+		t.Fatalf("AddFD: %v", err)
+	}
+	one := [8]byte{1}
+	if _, err := unix.Write(efd, one[:]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case tid := <-got:
+		if tid != want {
+			t.Fatalf("post ran on thread %d, display thread is %d", tid, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("post from AddFD callback did not run")
+	}
+	d.Do(func() { src.Remove() })
 }

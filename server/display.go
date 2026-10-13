@@ -54,11 +54,12 @@ var live = struct {
 	nextFD uintptr
 }{resources: map[uintptr]*Resource{}, binds: map[uintptr]BindFunc{}, clientGone: map[uintptr]func(){}, fds: map[uintptr]func(){}}
 
-// Display owns a wl_display. All methods except Do must run on the goroutine
-// that calls Run, or before Run starts.
+// Display owns a wl_display. All methods except Do and Post must run on the
+// goroutine that calls Run, or before Run starts.
 //
 // Resource, bind and client-listener state is shared by the whole process, so
 // only one Display may be running at a time per process.
+//
 // Do and Post wake the loop through an eventfd so calls run at once instead of
 // after the dispatch timeout.
 type Display struct {
@@ -198,6 +199,7 @@ func (d *Display) destroy() {
 	for s := range d.sources {
 		s.remove()
 	}
+	clear(d.sources)
 	wlDisplayDestroyClients(d.c)
 	wlEventSourceRemove(d.wakeSrc)
 	wlDisplayDestroy(d.c)
@@ -218,7 +220,9 @@ func (d *Display) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// Run every queued post and call; each also wrote the eventfd.
+		// Run every queued post and call. Wakes are coalesced, so the eventfd
+		// is not written once per item; it only makes the dispatch below
+		// return at once when work arrives while the loop is asleep.
 		d.drain()
 		wlDisplayFlushClients(d.c)
 		// The timeout only bounds how late ctx cancellation is seen.
@@ -284,9 +288,23 @@ func (d *Display) runPosts() bool {
 // goroutines is safe and avoids a per-call buffer (which escapes under -race).
 var wakeOne = [8]byte{1}
 
-// wakeLoop writes the eventfd on behalf of posts.
+// wakeLoop writes the eventfd on behalf of posts. The caller must hold postMu
+// (or be the display goroutine, which destroy cannot overlap) so the fd cannot
+// be closed, and its number reused, underneath the write.
 func (d *Display) wakeLoop() {
 	d.wakeWrites.Add(1)
+	_, _ = unix.Write(d.wake, wakeOne[:])
+}
+
+// wakeGuarded wakes the loop from any goroutine: it takes postMu and skips the
+// write once the display is closed, so a late caller never writes to a reused
+// fd number.
+func (d *Display) wakeGuarded() {
+	d.postMu.Lock()
+	defer d.postMu.Unlock()
+	if d.closed.Load() {
+		return
+	}
 	_, _ = unix.Write(d.wake, wakeOne[:])
 }
 
@@ -305,6 +323,10 @@ func (d *Display) wakeLoop() {
 // the display has stopped or been closed, Post silently drops fn, and posts
 // that had not run when the display stopped are dropped too. In steady state
 // Post does not allocate.
+//
+// The queue is unbounded: Post applies no backpressure, so a producer that
+// outpaces the display goroutine grows memory without limit. Callers that can
+// produce faster than the loop runs must bound or coalesce their own posts.
 func (d *Display) Post(fn func()) {
 	if fn == nil {
 		return
@@ -332,6 +354,11 @@ type Source struct {
 // registration is level-triggered: onReadable must consume the readiness (read
 // the eventfd or timerfd, accept, ...) or it is called again at once. It
 // should not block.
+//
+// onReadable is also called when the fd hangs up or errors (EPOLLHUP,
+// EPOLLERR), which level-triggered polling keeps reporting. The callback should
+// read the fd, and on EOF or error call Remove (it may do so from within the
+// callback), or it is called again at once.
 //
 // libwayland duplicates fd; the caller still owns and must close its own
 // descriptor, and should do so after Remove. Call AddFD only on the display
@@ -387,8 +414,7 @@ func (d *Display) Do(fn func()) bool {
 	case <-d.stopped:
 		return false
 	}
-	var one = [8]byte{1}
-	_, _ = unix.Write(d.wake, one[:])
+	d.wakeGuarded()
 	select {
 	case <-done:
 		return true
