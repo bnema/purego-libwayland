@@ -395,7 +395,6 @@ func TestPostMultiProducerNoLostWake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.dispatchMS = 60_000
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- d.Run(ctx) }()
