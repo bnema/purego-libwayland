@@ -360,10 +360,6 @@ func TestWritableBackpressureAndRemoval(t *testing.T) {
 	}
 }
 
-func TestSetWritableKernelError(t *testing.T) {
-	t.Skip("A live source owns a private duplicated fd; the public API cannot invalidate it. Removed sources are no-ops. Forcing epoll_ctl failure requires a fake or corrupting libwayland-owned state.")
-}
-
 // The Go runtime can interrupt epoll_wait with its preemption signal.
 func xwmDispatch(d *Display) int32 {
 	for attempt := 0; attempt < 16; attempt++ {
