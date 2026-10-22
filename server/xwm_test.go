@@ -47,7 +47,7 @@ func registry(t testing.TB, d *Display, fd int) int {
 		t.Fatal(err)
 	}
 	if xwmDispatch(d) < 0 {
-		t.Fatal("dispatch failed")
+		t.Fatalf("dispatch failed: errno=%v", lastErrno())
 	}
 	wlDisplayFlushClients(d.c)
 	var buf [4096]byte
@@ -116,7 +116,8 @@ func TestGlobalFilter(t *testing.T) {
 
 func TestWritableInterest(t *testing.T) {
 	d := xwmDisplay(t)
-	client, fd := xwmClient(t, d)
+	fds := xwmSocketpair(t)
+	fd := fds[0]
 	reads, writes := 0, 0
 	s, err := d.AddFDRW(fd, func() { reads++ }, func() { writes++ })
 	if err != nil {
@@ -124,7 +125,7 @@ func TestWritableInterest(t *testing.T) {
 	}
 	dispatch := func() {
 		if xwmDispatch(d) < 0 {
-			t.Fatal("dispatch failed")
+			t.Fatalf("dispatch failed: errno=%v", lastErrno())
 		}
 	}
 	dispatch()
@@ -151,10 +152,7 @@ func TestWritableInterest(t *testing.T) {
 		t.Fatal("writable not disabled")
 	}
 	// Readable callbacks also stay allocation-free through the real C loop.
-	serverFD, err := client.FD()
-	if err != nil {
-		t.Fatal(err)
-	}
+	serverFD := fds[1]
 	var payload = [1]byte{1}
 	if _, err := unix.Write(serverFD, payload[:]); err != nil {
 		t.Fatal(err)
@@ -213,7 +211,8 @@ func BenchmarkGlobalFilter(b *testing.B) {
 
 func BenchmarkFDCallback(b *testing.B) {
 	d := xwmDisplay(b)
-	_, fd := xwmClient(b, d)
+	fds := xwmSocketpair(b)
+	fd := fds[0]
 	s, err := d.AddFDRW(fd, func() {}, func() {})
 	if err != nil {
 		b.Fatal(err)
@@ -369,4 +368,16 @@ func xwmDispatch(d *Display) int32 {
 		}
 	}
 	return -1
+}
+
+// FD sources use raw sockets, not Wayland clients: arbitrary payloads must
+// never enter libwayland's protocol transport or its flush/error handling.
+func xwmSocketpair(t testing.TB) [2]int {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { unix.Close(fds[0]); unix.Close(fds[1]) })
+	return fds
 }
