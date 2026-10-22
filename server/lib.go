@@ -33,17 +33,19 @@ var (
 	symClientGetCredentials, symClientGetFD, symClientCreate                                uintptr
 	symClientAddDestroyListener, symListRemove                                              uintptr
 	symErrnoLocation                                                                        uintptr
+	symDisplaySetGlobalFilter, symEventSourceFDUpdate                                       uintptr
 	// wl_fixes support (libwayland 1.26+); zero on older libraries.
 	symFixesAckGlobalRemove uintptr
 
 	// Shared C callbacks. purego callbacks are never freed, so there is one
 	// of each for the whole process.
-	cbDispatcher uintptr
-	cbDestroy    uintptr
-	cbClientGone uintptr
-	cbBind       uintptr
-	cbWake       uintptr
-	cbFD         uintptr
+	cbDispatcher   uintptr
+	cbDestroy      uintptr
+	cbClientGone   uintptr
+	cbBind         uintptr
+	cbWake         uintptr
+	cbFD           uintptr
+	cbGlobalFilter uintptr
 )
 
 func load() error {
@@ -74,6 +76,8 @@ func load() error {
 			name string
 			sym  *uintptr
 		}{
+			{"wl_display_set_global_filter", &symDisplaySetGlobalFilter},
+			{"wl_event_source_fd_update", &symEventSourceFDUpdate},
 			{"wl_display_flush_clients", &symDisplayFlushClients},
 			{"wl_event_loop_dispatch", &symEventLoopDispatch},
 			{"wl_resource_create", &symResourceCreate},
@@ -128,6 +132,7 @@ func load() error {
 		cbWake = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
 			return uintptr(uint32(wake(int32(a.Int(0)), uint32(a.Int(1)), a.Int(2))))
 		})
+		cbGlobalFilter = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr { return uintptr(globalFilter(a.Int(0), a.Int(1), a.Int(2))) })
 		cbFD = purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
 			return uintptr(uint32(fdReadable(int32(a.Int(0)), uint32(a.Int(1)), a.Int(2))))
 		})
@@ -167,4 +172,12 @@ func wlResourceDestroy(resource uintptr) {
 }
 func wlFixesHandleAckGlobalRemove(fixes, registry uintptr, name uint32) {
 	purego.Syscall6(symFixesAckGlobalRemove, fixes, registry, uintptr(name), 0, 0, 0)
+}
+
+func wlDisplaySetGlobalFilter(display, callback, data uintptr) {
+	purego.Syscall6(symDisplaySetGlobalFilter, display, callback, data, 0, 0, 0)
+}
+func wlEventSourceFDUpdate(source uintptr, mask uint32) int32 {
+	r, _, _ := purego.Syscall6(symEventSourceFDUpdate, source, uintptr(mask), 0, 0, 0, 0)
+	return int32(r)
 }

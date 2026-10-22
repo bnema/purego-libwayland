@@ -50,10 +50,12 @@ var live = struct {
 	nextBind  uintptr
 	// clientGone maps wl_listener addresses to OnDestroy functions.
 	clientGone map[uintptr]func()
-	// fds maps AddFD tokens to their readable callbacks.
-	fds    map[uintptr]func()
-	nextFD uintptr
-}{resources: map[uintptr]*Resource{}, binds: map[uintptr]BindFunc{}, clientGone: map[uintptr]func(){}, fds: map[uintptr]func(){}}
+	// fds maps AddFD/AddFDRW tokens to their sources.
+	fds      map[uintptr]*Source
+	nextFD   uintptr
+	globals  map[uintptr]*Global
+	displays map[uintptr]*Display
+}{resources: map[uintptr]*Resource{}, binds: map[uintptr]BindFunc{}, clientGone: map[uintptr]func(){}, fds: map[uintptr]*Source{}, globals: map[uintptr]*Global{}, displays: map[uintptr]*Display{}}
 
 // Display owns a wl_display. All methods except Do and Post must run on the
 // goroutine that calls Run, or before Run starts.
@@ -88,7 +90,9 @@ type Display struct {
 	wakeWrites atomic.Uint64
 
 	// sources are the AddFD sources not yet removed (display goroutine only).
-	sources map[*Source]struct{}
+	sources       map[*Source]struct{}
+	filter        func(Client, *Global) bool
+	pendingGlobal *Global
 }
 
 // maxDrainRounds bounds how many times one loop iteration re-drains calls and
@@ -116,6 +120,7 @@ func NewDisplay() (*Display, error) {
 		wlDisplayDestroy(c)
 		return nil, errors.New("purego-libwayland: wl_event_loop_add_fd failed")
 	}
+	live.displays[c] = d
 	return d, nil
 }
 
@@ -133,19 +138,56 @@ func (d *Display) CreateGlobal(iface *Interface, version int32, bindFn BindFunc)
 }
 
 // Global is a global that can be withdrawn, such as a wl_output on hotplug.
-type Global struct{ c uintptr }
+type Global struct {
+	c uintptr
+	d *Display
+}
+
+// SetGlobalFilter controls global visibility and binding for each client. nil
+// removes the filter. Install it before advertising restricted globals; it does
+// not retract announcements already sent. The callback must not block or create
+// globals. Display goroutine only.
+func (d *Display) SetGlobalFilter(fn func(Client, *Global) bool) {
+	d.filter = fn
+	callback := uintptr(0)
+	if fn != nil {
+		callback = cbGlobalFilter
+	}
+	wlDisplaySetGlobalFilter(d.c, callback, d.c)
+}
+
+func globalFilter(client, global, data uintptr) uint32 {
+	d := live.displays[data]
+	if d == nil || d.filter == nil {
+		return 1
+	}
+	g := live.globals[global]
+	// wl_global_create announces synchronously, before returning its pointer.
+	if g == nil {
+		g = d.pendingGlobal
+	}
+	if g != nil && d.filter(Client{client}, g) {
+		return 1
+	}
+	return 0
+}
 
 // AddGlobal advertises a global and returns a handle to remove it later.
 func (d *Display) AddGlobal(iface *Interface, version int32, bindFn BindFunc) (*Global, error) {
 	live.nextBind++
 	token := live.nextBind
 	live.binds[token] = bindFn
+	g := &Global{d: d}
+	d.pendingGlobal = g
 	c := wlGlobalCreate(d.c, iface.c, version, token, cbBind)
+	d.pendingGlobal = nil
 	if c == 0 {
 		delete(live.binds, token)
 		return nil, fmt.Errorf("purego-libwayland: wl_global_create(%s) failed", iface.Name)
 	}
-	return &Global{c: c}, nil
+	g.c = c
+	live.globals[c] = g
+	return g, nil
 }
 
 // Remove withdraws the global: clients get wl_registry.global_remove.
@@ -204,6 +246,14 @@ func (d *Display) destroy() {
 	wlDisplayDestroyClients(d.c)
 	wlEventSourceRemove(d.wakeSrc)
 	wlDisplayDestroy(d.c)
+	delete(live.displays, d.c)
+	for p, g := range live.globals {
+		if g.d == d {
+			g.c = 0
+			delete(live.globals, p)
+		}
+	}
+	d.filter = nil
 	unix.Close(d.wake)
 }
 
@@ -390,9 +440,10 @@ func (d *Display) Post(fn func()) {
 
 // Source is an fd registered with the display's event loop by AddFD.
 type Source struct {
-	d     *Display
-	c     uintptr
-	token uintptr
+	d                      *Display
+	c                      uintptr
+	token                  uintptr
+	onReadable, onWritable func()
 }
 
 // AddFD calls onReadable on the display goroutine whenever fd is readable. The
@@ -410,6 +461,14 @@ type Source struct {
 // goroutine or before Run starts. Sources not removed are released when the
 // display is destroyed.
 func (d *Display) AddFD(fd int, onReadable func()) (*Source, error) {
+	return d.AddFDRW(fd, onReadable, nil)
+}
+
+// AddFDRW is AddFD with an optional writable callback. Writable interest starts
+// disabled; use SetWritable to arm it after a non-blocking write returns EAGAIN.
+// Both callbacks must not block. Readable runs first; removing the source there
+// suppresses writable delivery in the same dispatch.
+func (d *Display) AddFDRW(fd int, onReadable, onWritable func()) (*Source, error) {
 	if fd < 0 {
 		return nil, fmt.Errorf("purego-libwayland: AddFD: invalid fd %d", fd)
 	}
@@ -421,15 +480,36 @@ func (d *Display) AddFD(fd int, onReadable func()) (*Source, error) {
 	}
 	live.nextFD++
 	token := live.nextFD
-	live.fds[token] = onReadable
+	s := &Source{d: d, token: token, onReadable: onReadable, onWritable: onWritable}
+	live.fds[token] = s
 	c := wlEventLoopAddFD(d.loop, int32(fd), 1 /* WL_EVENT_READABLE */, cbFD, token)
 	if c == 0 {
 		delete(live.fds, token)
 		return nil, fmt.Errorf("purego-libwayland: wl_event_loop_add_fd(%d) failed", fd)
 	}
-	s := &Source{d: d, c: c, token: token}
+	s.c = c
 	d.sources[s] = struct{}{}
 	return s, nil
+}
+
+// SetWritable toggles writable interest while always retaining readable interest.
+// Disable it when buffered writes are drained to avoid a busy loop. Display
+// goroutine only. A removed source is a no-op; enabling requires onWritable.
+func (s *Source) SetWritable(on bool) error {
+	if s == nil || s.c == 0 {
+		return nil
+	}
+	mask := uint32(1)
+	if on {
+		if s.onWritable == nil {
+			return errors.New("purego-libwayland: no writable callback")
+		}
+		mask |= 2
+	}
+	if wlEventSourceFDUpdate(s.c, mask) < 0 {
+		return lastErrno()
+	}
+	return nil
 }
 
 // Remove stops the callbacks and releases libwayland's duplicate of the fd.
@@ -658,9 +738,14 @@ func wake(fd int32, mask uint32, data uintptr) int32 {
 }
 
 // fdReadable dispatches an AddFD source (wl_event_loop_fd_func_t).
-func fdReadable(_ int32, _ uint32, data uintptr) int32 {
-	if fn := live.fds[data]; fn != nil {
-		fn()
+func fdReadable(_ int32, mask uint32, data uintptr) int32 {
+	if s := live.fds[data]; s != nil {
+		if mask&(1|4|8) != 0 {
+			s.onReadable()
+		}
+		if s.c != 0 && mask&2 != 0 && s.onWritable != nil {
+			s.onWritable()
+		}
 	}
 	return 0
 }
