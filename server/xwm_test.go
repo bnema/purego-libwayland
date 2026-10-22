@@ -46,7 +46,7 @@ func registry(t testing.TB, d *Display, fd int) int {
 	if _, err := unix.Write(fd, request[:]); err != nil {
 		t.Fatal(err)
 	}
-	if wlEventLoopDispatch(d.loop, 0) < 0 {
+	if xwmDispatch(d) < 0 {
 		t.Fatal("dispatch failed")
 	}
 	wlDisplayFlushClients(d.c)
@@ -123,7 +123,7 @@ func TestWritableInterest(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatch := func() {
-		if wlEventLoopDispatch(d.loop, 0) < 0 {
+		if xwmDispatch(d) < 0 {
 			t.Fatal("dispatch failed")
 		}
 	}
@@ -224,6 +224,153 @@ func BenchmarkFDCallback(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		wlEventLoopDispatch(d.loop, 0)
+		xwmDispatch(d)
 	}
+}
+
+func TestLateRestrictedGlobal(t *testing.T) {
+	d := xwmDisplay(t)
+	allowed, a := xwmClient(t, d)
+	_, denied := xwmClient(t, d)
+	if registry(t, d, a) != 0 || registry(t, d, denied) != 0 {
+		t.Fatal("unexpected globals")
+	}
+	iface := &Interface{Name: "xwm_late_restricted", Version: 2}
+	if err := NewInterfaces(iface); err != nil {
+		t.Fatal(err)
+	}
+	calls, binds := 0, 0
+	policy := func(c Client, g *Global) bool {
+		calls++
+		if g.Version() != 2 {
+			t.Error("creation-time version unavailable")
+		}
+		return g.Interface() != iface.Name || c == allowed
+	}
+	d.SetGlobalFilter(policy)
+	g, err := d.AddGlobal(iface, 2, func(Client, uint32, uint32) { binds++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("creation-time calls = %d", calls)
+	}
+	wlDisplayFlushClients(d.c)
+	var buf [4096]byte
+	n, err := unix.Read(a, buf[:])
+	if err != nil || n < 16 {
+		t.Fatalf("allowed announcement: n=%d err=%v", n, err)
+	}
+	name := binary.NativeEndian.Uint32(buf[8:12])
+	if n, err := unix.Read(denied, buf[:]); err != unix.EAGAIN || n > 0 {
+		t.Fatalf("denied announcement: n=%d err=%v", n, err)
+	}
+	if allocs := testing.AllocsPerRun(1000, func() { purego.Syscall6(cbGlobalFilter, allowed.c, g.c, d.c, 0, 0, 0) }); allocs != 0 {
+		t.Fatalf("metadata policy allocs = %g", allocs)
+	}
+	// Guessing a hidden global's numeric name must not bypass the filter.
+	strLen := len(iface.Name) + 1
+	padded := (strLen + 3) &^ 3
+	req := make([]byte, 24+padded)
+	binary.NativeEndian.PutUint32(req[0:4], 2)                    // wl_registry
+	binary.NativeEndian.PutUint32(req[4:8], uint32(len(req))<<16) // bind
+	binary.NativeEndian.PutUint32(req[8:12], name)
+	binary.NativeEndian.PutUint32(req[12:16], uint32(strLen))
+	copy(req[16:], iface.Name)
+	binary.NativeEndian.PutUint32(req[16+padded:], 2)
+	binary.NativeEndian.PutUint32(req[20+padded:], 3)
+	if _, err := unix.Write(denied, req); err != nil {
+		t.Fatal(err)
+	}
+	if xwmDispatch(d) < 0 {
+		t.Fatal("dispatch")
+	}
+	wlDisplayFlushClients(d.c)
+	if binds != 0 {
+		t.Fatal("denied bind reached handler")
+	}
+	n, err = unix.Read(denied, buf[:])
+	if err != nil || n < 12 || binary.NativeEndian.Uint32(buf[:4]) != 1 || binary.NativeEndian.Uint32(buf[4:8])&0xffff != 0 {
+		t.Fatalf("expected wl_display.error: n=%d err=%v", n, err)
+	}
+}
+
+func TestWritableBackpressureAndRemoval(t *testing.T) {
+	d := xwmDisplay(t)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+	if err := unix.SetsockoptInt(fds[0], unix.SOL_SOCKET, unix.SO_SNDBUF, 4096); err != nil {
+		t.Fatal(err)
+	}
+	var payload [4096]byte
+	total := 0
+	for attempts := 0; attempts < 1024; attempts++ {
+		n, err := unix.Write(fds[0], payload[:])
+		if err == unix.EAGAIN {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += n
+	}
+	if _, err := unix.Write(fds[0], payload[:]); err != unix.EAGAIN {
+		t.Fatalf("not backpressured: %v", err)
+	}
+	writes := 0
+	var s *Source
+	s, err = d.AddFDRW(fds[0], func() { t.Error("unexpected readable") }, func() {
+		writes++
+		if n, err := unix.Write(fds[0], payload[:1]); err != nil || n != 1 {
+			t.Errorf("resume: n=%d err=%v", n, err)
+		}
+		if err := s.SetWritable(false); err != nil {
+			t.Error(err)
+		}
+		s.Remove() // Removal from a real C-dispatched callback.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetWritable(true); err != nil {
+		t.Fatal(err)
+	}
+	xwmDispatch(d)
+	if writes != 0 {
+		t.Fatal("writable fired before peer drained")
+	}
+	for remaining := total; remaining > 0; {
+		n, err := unix.Read(fds[1], payload[:])
+		if err != nil || n == 0 {
+			t.Fatalf("drain: n=%d err=%v", n, err)
+		}
+		remaining -= n
+	}
+	xwmDispatch(d)
+	if writes != 1 || s.c != 0 {
+		t.Fatalf("writes=%d source=%x", writes, s.c)
+	}
+	xwmDispatch(d)
+	if writes != 1 {
+		t.Fatal("removed source dispatched again")
+	}
+}
+
+func TestSetWritableKernelError(t *testing.T) {
+	t.Skip("A live source owns a private duplicated fd; the public API cannot invalidate it. Removed sources are no-ops. Forcing epoll_ctl failure requires a fake or corrupting libwayland-owned state.")
+}
+
+// The Go runtime can interrupt epoll_wait with its preemption signal.
+func xwmDispatch(d *Display) int32 {
+	for attempt := 0; attempt < 16; attempt++ {
+		result := wlEventLoopDispatch(d.loop, 0)
+		if result >= 0 || lastErrno() != unix.EINTR {
+			return result
+		}
+	}
+	return -1
 }

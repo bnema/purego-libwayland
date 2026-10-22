@@ -25,7 +25,11 @@ Generated protocol bindings live in [github.com/bnema/go-wayland-bindings](https
 `Display.SetGlobalFilter(func(Client, *Global) bool)` controls which clients see
 and bind each global; passing `nil` removes the filter. Set it before clients
 receive restricted globals. Global handles are stable, including during creation;
-filters must not create globals or block.
+filters must not create globals or block. Filter by `g.Interface()` (for example,
+`g.Interface() != "xwayland_shell_v1" || c == xwaylandClient`), not a captured
+handle assigned by `AddGlobal`: creation can invoke the filter before that
+assignment. `Interface()` and `Version()` expose stored metadata without
+allocation, including during creation.
 
 `Display.AddFDRW(fd, onReadable, onWritable)` registers a non-blocking fd with
 writable interest initially disabled. `Source.SetWritable(true)` arms writable

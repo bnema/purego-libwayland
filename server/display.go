@@ -139,9 +139,18 @@ func (d *Display) CreateGlobal(iface *Interface, version int32, bindFn BindFunc)
 
 // Global is a global that can be withdrawn, such as a wl_output on hotplug.
 type Global struct {
-	c uintptr
-	d *Display
+	c             uintptr
+	d             *Display
+	interfaceName string
+	version       int32
 }
+
+// Interface returns the advertised interface name without allocating. It is
+// available even in filter calls made synchronously during AddGlobal.
+func (g *Global) Interface() string { return g.interfaceName }
+
+// Version returns the advertised version, including during AddGlobal filtering.
+func (g *Global) Version() int32 { return g.version }
 
 // SetGlobalFilter controls global visibility and binding for each client. nil
 // removes the filter. Install it before advertising restricted globals; it does
@@ -177,7 +186,7 @@ func (d *Display) AddGlobal(iface *Interface, version int32, bindFn BindFunc) (*
 	live.nextBind++
 	token := live.nextBind
 	live.binds[token] = bindFn
-	g := &Global{d: d}
+	g := &Global{d: d, interfaceName: iface.Name, version: version}
 	d.pendingGlobal = g
 	c := wlGlobalCreate(d.c, iface.c, version, token, cbBind)
 	d.pendingGlobal = nil
