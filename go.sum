@@ -1,4 +1,4 @@
-github.com/bnema/purego v0.13.0-bnema.2 h1:FgGAFNswiShd+A4lFuP5broqjOzW4Lf8f6OZKjgXzAM=
-github.com/bnema/purego v0.13.0-bnema.2/go.mod h1:xS1iX3noypxnbOUEUAqOvkfnUzgHuu19VtL4+dfUMJM=
+bnema.dev/purego v0.13.0-bnema.3 h1:15iXEOkg0WrpUKoLnoD/94qX4gPc+F4T6hTbpUWg81s=
+bnema.dev/purego v0.13.0-bnema.3/go.mod h1:isZX4JISlvO21uwYXw3coKTo8RhwMpLpdro6jLIp++s=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
 golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

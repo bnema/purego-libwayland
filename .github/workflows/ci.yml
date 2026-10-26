@@ -47,7 +47,7 @@ jobs:
       - name: Build and test go-wayland-bindings against this checkout
         working-directory: bindings
         run: |
-          go mod edit -replace github.com/bnema/purego-libwayland=../purego-libwayland
+          go mod edit -replace bnema.dev/purego-libwayland=../purego-libwayland
           go mod tidy
           CGO_ENABLED=0 go build ./...
           go vet ./server/...

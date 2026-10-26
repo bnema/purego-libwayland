@@ -5,7 +5,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/bnema/purego"
+	"bnema.dev/purego"
 	"golang.org/x/sys/unix"
 )
 
