@@ -22,6 +22,10 @@ var (
 	wlGlobalCreate          func(display, iface uintptr, version int32, data uintptr, bind uintptr) uintptr
 	wlGlobalRemove          func(global uintptr)
 	wlResourcePostError     func(resource uintptr, code uint32, msg uintptr)
+	// wl_client_post_implementation_error (libwayland 1.21+), nil on older
+	// libraries. Called like wl_resource_post_error: an escaped message as
+	// the format and no variadic arguments (purego clears AL).
+	wlClientPostImplementationError func(client, msg uintptr)
 )
 
 var (
@@ -36,6 +40,8 @@ var (
 	symDisplaySetGlobalFilter, symEventSourceFDUpdate                                       uintptr
 	// wl_fixes support (libwayland 1.26+); zero on older libraries.
 	symFixesAckGlobalRemove uintptr
+	// wl_client_get_object, the fallback path of PostImplementationError.
+	symClientGetObject uintptr
 
 	// Shared C callbacks. purego callbacks are never freed, so there is one
 	// of each for the whole process.
@@ -98,6 +104,10 @@ func load() error {
 			}
 		}
 		symFixesAckGlobalRemove, _ = purego.Dlsym(lib, "wl_fixes_handle_ack_global_remove")
+		symClientGetObject, _ = purego.Dlsym(lib, "wl_client_get_object")
+		if sym, err := purego.Dlsym(lib, "wl_client_post_implementation_error"); err == nil && sym != 0 {
+			purego.RegisterFunc(&wlClientPostImplementationError, sym)
+		}
 		symErrnoLocation, err = purego.Dlsym(lib, "__errno_location")
 		if err != nil {
 			libc, openErr := purego.Dlopen("libc.so.6", purego.RTLD_NOW|purego.RTLD_GLOBAL)

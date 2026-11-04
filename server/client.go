@@ -3,6 +3,8 @@ package server
 import (
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"unsafe"
 
 	"bnema.dev/purego"
@@ -141,4 +143,43 @@ func clientGone(l uintptr) {
 	if fn != nil {
 		fn()
 	}
+}
+
+// displayErrorImplementation is wl_display.error code implementation.
+const displayErrorImplementation = 3
+
+// PostImplementationError reports a compositor-side failure caused by the
+// client (for example a resource limit) as a wl_display.error with code
+// implementation, then disconnects the client, like
+// wl_client_post_implementation_error. msg is sent verbatim, never used as
+// a format. With libwayland older than 1.21 it posts the same error on the
+// client's wl_display object through wl_resource_post_error. It reports
+// false for an invalid (zero) Client or when neither path is available.
+// It does not allocate beyond the C message copy. Display goroutine only.
+func (c Client) PostImplementationError(msg string) bool {
+	if c.c == 0 {
+		return false
+	}
+	var display uintptr
+	if wlClientPostImplementationError == nil {
+		if symClientGetObject == 0 {
+			return false
+		}
+		if display, _, _ = purego.Syscall6(symClientGetObject, c.c, 1, 0, 0, 0, 0); display == 0 {
+			return false
+		}
+	}
+	// libwayland takes a printf format: escape it and pass no variadic
+	// arguments, so msg is sent verbatim.
+	b := append([]byte(strings.ReplaceAll(msg, "%", "%%")), 0)
+	var pin runtime.Pinner
+	pin.Pin(&b[0])
+	defer pin.Unpin()
+	if display == 0 {
+		wlClientPostImplementationError(c.c, uintptr(unsafe.Pointer(&b[0])))
+	} else {
+		wlResourcePostError(display, displayErrorImplementation, uintptr(unsafe.Pointer(&b[0])))
+	}
+	runtime.KeepAlive(b)
+	return true
 }

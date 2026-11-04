@@ -42,6 +42,15 @@ remove the source on EOF/error. The caller owns the original fd.
 These APIs, like other libwayland operations, belong on the display's OS-locked
 goroutine (use `Do` or `Post` from other goroutines).
 
+## Client errors
+
+`Client.PostImplementationError(msg)` sends `wl_display.error` with code
+`implementation` (3) and disconnects the client, for failures that are not a
+protocol's own error (for example a resource limit). `msg` is sent verbatim.
+It uses `wl_client_post_implementation_error` (libwayland 1.21+) and, on older
+libraries, posts the same error on the client's `wl_display` object. It returns
+false for a zero `Client`. Display goroutine only.
+
 ## License
 
 MIT, see `LICENSE`.
